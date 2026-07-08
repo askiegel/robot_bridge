@@ -23,5 +23,15 @@ def status():
     })
 
 
+@app.route("/stop", methods=["POST"])
+def stop():
+    return jsonify({
+        "ok": True,
+        "action": "stop",
+        "timestamp": now_iso(),
+        "message": "Stop endpoint received. ROS2 stop publishing will be added next.",
+    })
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8090)
