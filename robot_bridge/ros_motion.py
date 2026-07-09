@@ -26,30 +26,31 @@ class RosMotion:
             self._publisher = self._node.create_publisher(Twist, MOTION_TOPIC, 10)
             self._initialized = True
 
-    def publish_motion(self, linear_x=0.0, angular_z=0.0, duration=0.25):
-        self.initialize()
-
+    def _publish_twist(self, linear_x=0.0, angular_z=0.0):
         msg = Twist()
         msg.linear.x = float(linear_x)
         msg.angular.z = float(angular_z)
+        self._publisher.publish(msg)
+        rclpy.spin_once(self._node, timeout_sec=0.02)
 
-        end_time = time.time() + float(duration)
+    def publish_motion(self, linear_x=0.0, angular_z=0.0, duration=0.25):
+        self.initialize()
 
-        while time.time() < end_time:
-            self._publisher.publish(msg)
-            rclpy.spin_once(self._node, timeout_sec=0.02)
-            time.sleep(0.05)
+        try:
+            end_time = time.time() + float(duration)
+
+            while time.time() < end_time:
+                self._publish_twist(linear_x, angular_z)
+                time.sleep(0.05)
+
+        finally:
+            self.stop()
 
     def stop(self):
         self.initialize()
 
-        msg = Twist()
-        msg.linear.x = 0.0
-        msg.angular.z = 0.0
-
-        for _ in range(5):
-            self._publisher.publish(msg)
-            rclpy.spin_once(self._node, timeout_sec=0.02)
+        for _ in range(10):
+            self._publish_twist(0.0, 0.0)
             time.sleep(0.05)
 
 
