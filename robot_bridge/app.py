@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 from robot_bridge.config import HOST, PORT, MOTION_TOPIC
-from robot_bridge.ros_motion import stop as stop_motion
+from robot_bridge.ros_motion import publish_motion, stop as stop_motion
 
 
 app = Flask(__name__)
@@ -24,6 +24,31 @@ def status():
         "motion_topic": MOTION_TOPIC,
         "ros2_runtime": "~/ros2_ws",
         "controller": "/quadruped_controller_node",
+    })
+
+
+@app.route("/motion", methods=["POST"])
+def motion():
+    data = request.get_json(silent=True) or {}
+
+    linear_x = float(data.get("linear_x", 0.0))
+    angular_z = float(data.get("angular_z", 0.0))
+    duration = float(data.get("duration", 0.25))
+
+    publish_motion(
+        linear_x=linear_x,
+        angular_z=angular_z,
+        duration=duration,
+    )
+
+    return jsonify({
+        "ok": True,
+        "action": "motion",
+        "timestamp": now_iso(),
+        "linear_x": linear_x,
+        "angular_z": angular_z,
+        "duration": duration,
+        "message": "Motion command published to /cmd_vel.",
     })
 
 
