@@ -21,10 +21,26 @@ MAX_LINEAR_X = 0.20
 MAX_ANGULAR_Z = 1.00
 MAX_DURATION = 2.00
 
+STREAM_PUBLISH_HZ = 20.0
+STREAM_DEFAULT_TIMEOUT_SECONDS = 0.75
+STREAM_MIN_TIMEOUT_SECONDS = 0.20
+STREAM_MAX_TIMEOUT_SECONDS = 2.00
+
 ros_ready = False
 ros_error = None
 publisher_node = None
 publisher_lock = threading.Lock()
+
+motion_lock = threading.RLock()
+motion_state = {
+    "streaming": False,
+    "linear_x": 0.0,
+    "angular_z": 0.0,
+    "deadline_monotonic": None,
+    "last_command_at": None,
+    "last_stop_at": None,
+    "watchdog_stop_count": 0,
+}
 
 
 def now_iso():
@@ -34,6 +50,7 @@ def now_iso():
 class RobotBridgePublisher(Node):
     def __init__(self):
         super().__init__("robot_bridge_publisher")
+
         self.publisher = self.create_publisher(
             Twist,
             MOTION_TOPIC,
@@ -63,6 +80,9 @@ def ros_spin():
     global ros_error
     global publisher_node
 
+    executor = None
+    node = None
+
     try:
         rclpy.init(args=None)
 
@@ -79,18 +99,24 @@ def ros_spin():
     except Exception as exc:
         ros_ready = False
         ros_error = str(exc)
-        print(f"Robot Bridge ROS2 error: {exc}")
+
+        print(
+            f"Robot Bridge ROS2 error: {exc}",
+            flush=True,
+        )
 
     finally:
         ros_ready = False
 
         try:
-            executor.shutdown()
+            if executor is not None:
+                executor.shutdown()
         except Exception:
             pass
 
         try:
-            node.destroy_node()
+            if node is not None:
+                node.destroy_node()
         except Exception:
             pass
 
@@ -105,7 +131,10 @@ def publish_twist(linear_x, angular_z):
     if not ros_ready or publisher_node is None:
         return {
             "ok": False,
-            "error": ros_error or "ROS2 publisher is not ready.",
+            "error": (
+                ros_error
+                or "ROS2 publisher is not ready."
+            ),
         }
 
     try:
@@ -124,11 +153,24 @@ def publish_twist(linear_x, angular_z):
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"ROS2 publish failed: {exc}",
+            "error": (
+                f"ROS2 publish failed: {exc}"
+            ),
         }
 
 
+def clear_streaming_state():
+    with motion_lock:
+        motion_state["streaming"] = False
+        motion_state["linear_x"] = 0.0
+        motion_state["angular_z"] = 0.0
+        motion_state["deadline_monotonic"] = None
+        motion_state["last_stop_at"] = now_iso()
+
+
 def stop_robot():
+    clear_streaming_state()
+
     result = publish_twist(0.0, 0.0)
 
     if result.get("ok"):
@@ -137,74 +179,331 @@ def stop_robot():
     return result
 
 
+def set_streaming_motion(
+    linear_x,
+    angular_z,
+    timeout_seconds,
+):
+    deadline = (
+        time.monotonic()
+        + float(timeout_seconds)
+    )
+
+    timestamp = now_iso()
+
+    with motion_lock:
+        motion_state["streaming"] = True
+        motion_state["linear_x"] = float(
+            linear_x
+        )
+        motion_state["angular_z"] = float(
+            angular_z
+        )
+        motion_state[
+            "deadline_monotonic"
+        ] = deadline
+        motion_state["last_command_at"] = (
+            timestamp
+        )
+
+    return {
+        "ok": True,
+        "linear_x": float(linear_x),
+        "angular_z": float(angular_z),
+        "watchdog_timeout_seconds": float(
+            timeout_seconds
+        ),
+        "last_command_at": timestamp,
+    }
+
+
+def streaming_motion_loop():
+    interval = 1.0 / STREAM_PUBLISH_HZ
+
+    while True:
+        started = time.monotonic()
+
+        should_publish_motion = False
+        should_publish_stop = False
+        linear_x = 0.0
+        angular_z = 0.0
+
+        with motion_lock:
+            if motion_state["streaming"]:
+                deadline = motion_state[
+                    "deadline_monotonic"
+                ]
+
+                if (
+                    deadline is not None
+                    and time.monotonic() >= deadline
+                ):
+                    motion_state[
+                        "streaming"
+                    ] = False
+                    motion_state[
+                        "linear_x"
+                    ] = 0.0
+                    motion_state[
+                        "angular_z"
+                    ] = 0.0
+                    motion_state[
+                        "deadline_monotonic"
+                    ] = None
+                    motion_state[
+                        "last_stop_at"
+                    ] = now_iso()
+                    motion_state[
+                        "watchdog_stop_count"
+                    ] += 1
+
+                    should_publish_stop = True
+
+                else:
+                    linear_x = motion_state[
+                        "linear_x"
+                    ]
+                    angular_z = motion_state[
+                        "angular_z"
+                    ]
+
+                    should_publish_motion = True
+
+        if should_publish_motion:
+            publish_twist(
+                linear_x,
+                angular_z,
+            )
+
+        elif should_publish_stop:
+            publish_twist(0.0, 0.0)
+
+            print(
+                "Robot Bridge streaming watchdog "
+                "published automatic stop.",
+                flush=True,
+            )
+
+        elapsed = time.monotonic() - started
+        remaining = interval - elapsed
+
+        if remaining > 0.0:
+            time.sleep(remaining)
+
+
+def validate_motion_payload(payload):
+    try:
+        linear_x = float(
+            payload.get("linear_x", 0.0)
+        )
+
+        angular_z = float(
+            payload.get("angular_z", 0.0)
+        )
+
+        duration = float(
+            payload.get("duration", 0.25)
+        )
+
+        streaming = bool(
+            payload.get("streaming", False)
+        )
+
+        watchdog_timeout = float(
+            payload.get(
+                "watchdog_timeout",
+                STREAM_DEFAULT_TIMEOUT_SECONDS,
+            )
+        )
+
+    except (TypeError, ValueError):
+        return None, {
+            "ok": False,
+            "error": (
+                "linear_x, angular_z, duration, "
+                "and watchdog_timeout must be numeric."
+            ),
+        }
+
+    if abs(linear_x) > MAX_LINEAR_X:
+        return None, {
+            "ok": False,
+            "error": (
+                f"linear_x exceeds safe limit "
+                f"of {MAX_LINEAR_X}."
+            ),
+        }
+
+    if abs(angular_z) > MAX_ANGULAR_Z:
+        return None, {
+            "ok": False,
+            "error": (
+                f"angular_z exceeds safe limit "
+                f"of {MAX_ANGULAR_Z}."
+            ),
+        }
+
+    if duration <= 0.0 or duration > MAX_DURATION:
+        return None, {
+            "ok": False,
+            "error": (
+                "duration must be greater than 0 "
+                f"and no more than {MAX_DURATION} "
+                "seconds."
+            ),
+        }
+
+    if (
+        watchdog_timeout
+        < STREAM_MIN_TIMEOUT_SECONDS
+        or watchdog_timeout
+        > STREAM_MAX_TIMEOUT_SECONDS
+    ):
+        return None, {
+            "ok": False,
+            "error": (
+                "watchdog_timeout must be between "
+                f"{STREAM_MIN_TIMEOUT_SECONDS} and "
+                f"{STREAM_MAX_TIMEOUT_SECONDS} "
+                "seconds."
+            ),
+        }
+
+    return {
+        "linear_x": linear_x,
+        "angular_z": angular_z,
+        "duration": duration,
+        "streaming": streaming,
+        "watchdog_timeout": watchdog_timeout,
+    }, None
+
+
 @app.route("/status", methods=["GET"])
 def status():
+    with motion_lock:
+        stream_snapshot = {
+            "streaming": bool(
+                motion_state["streaming"]
+            ),
+            "linear_x": float(
+                motion_state["linear_x"]
+            ),
+            "angular_z": float(
+                motion_state["angular_z"]
+            ),
+            "last_command_at": motion_state[
+                "last_command_at"
+            ],
+            "last_stop_at": motion_state[
+                "last_stop_at"
+            ],
+            "watchdog_stop_count": int(
+                motion_state[
+                    "watchdog_stop_count"
+                ]
+            ),
+        }
+
     return jsonify(
         {
             "ok": bool(ros_ready),
-            "service": "mini_pupper_robot_bridge",
+            "service": (
+                "mini_pupper_robot_bridge"
+            ),
             "timestamp": now_iso(),
             "robot": "mini_pupper_2",
-            "status": "READY" if ros_ready else "ROS_NOT_READY",
+            "status": (
+                "READY"
+                if ros_ready
+                else "ROS_NOT_READY"
+            ),
             "motion_topic": MOTION_TOPIC,
-            "controller": "/quadruped_controller_node",
+            "controller": (
+                "/quadruped_controller_node"
+            ),
             "ros_ready": ros_ready,
             "ros_error": ros_error,
+            "stream_publish_hz": (
+                STREAM_PUBLISH_HZ
+            ),
+            "stream_default_timeout_seconds": (
+                STREAM_DEFAULT_TIMEOUT_SECONDS
+            ),
+            "motion": stream_snapshot,
         }
     )
 
 
 @app.route("/motion", methods=["POST"])
 def motion():
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(
+        silent=True
+    ) or {}
 
-    try:
-        linear_x = float(payload.get("linear_x", 0.0))
-        angular_z = float(payload.get("angular_z", 0.0))
-        duration = float(payload.get("duration", 0.25))
-    except (TypeError, ValueError):
+    parsed, error = validate_motion_payload(
+        payload
+    )
+
+    if error is not None:
+        return jsonify(error), 400
+
+    linear_x = parsed["linear_x"]
+    angular_z = parsed["angular_z"]
+    duration = parsed["duration"]
+    streaming = parsed["streaming"]
+    watchdog_timeout = parsed[
+        "watchdog_timeout"
+    ]
+
+    if streaming:
+        initial_result = publish_twist(
+            linear_x=linear_x,
+            angular_z=angular_z,
+        )
+
+        if not initial_result.get("ok"):
+            stop_robot()
+
+            return jsonify(
+                {
+                    "ok": False,
+                    "action": "motion",
+                    "mode": "streaming",
+                    "timestamp": now_iso(),
+                    "error": initial_result.get(
+                        "error",
+                        "ROS2 motion publish failed.",
+                    ),
+                    "motion_result": (
+                        initial_result
+                    ),
+                }
+            ), 503
+
+        stream_result = set_streaming_motion(
+            linear_x=linear_x,
+            angular_z=angular_z,
+            timeout_seconds=watchdog_timeout,
+        )
+
         return jsonify(
             {
-                "ok": False,
-                "error": (
-                    "linear_x, angular_z, and duration "
-                    "must be numeric."
+                "ok": True,
+                "action": "motion",
+                "mode": "streaming",
+                "timestamp": now_iso(),
+                "linear_x": linear_x,
+                "angular_z": angular_z,
+                "watchdog_timeout": (
+                    watchdog_timeout
                 ),
+                "automatic_stop": True,
+                "returned_immediately": True,
+                "stream_result": stream_result,
             }
-        ), 400
+        )
 
-    if abs(linear_x) > MAX_LINEAR_X:
-        return jsonify(
-            {
-                "ok": False,
-                "error": (
-                    f"linear_x exceeds safe limit "
-                    f"of {MAX_LINEAR_X}."
-                ),
-            }
-        ), 400
-
-    if abs(angular_z) > MAX_ANGULAR_Z:
-        return jsonify(
-            {
-                "ok": False,
-                "error": (
-                    f"angular_z exceeds safe limit "
-                    f"of {MAX_ANGULAR_Z}."
-                ),
-            }
-        ), 400
-
-    if duration <= 0.0 or duration > MAX_DURATION:
-        return jsonify(
-            {
-                "ok": False,
-                "error": (
-                    "duration must be greater than 0 and "
-                    f"no more than {MAX_DURATION} seconds."
-                ),
-            }
-        ), 400
+    clear_streaming_state()
 
     motion_result = publish_twist(
         linear_x=linear_x,
@@ -218,6 +517,7 @@ def motion():
             {
                 "ok": False,
                 "action": "motion",
+                "mode": "bounded",
                 "timestamp": now_iso(),
                 "error": motion_result.get(
                     "error",
@@ -236,9 +536,11 @@ def motion():
             {
                 "ok": False,
                 "action": "motion",
+                "mode": "bounded",
                 "timestamp": now_iso(),
                 "error": (
-                    "Motion executed, but automatic stop failed."
+                    "Motion executed, but "
+                    "automatic stop failed."
                 ),
                 "linear_x": linear_x,
                 "angular_z": angular_z,
@@ -252,11 +554,13 @@ def motion():
         {
             "ok": True,
             "action": "motion",
+            "mode": "bounded",
             "timestamp": now_iso(),
             "linear_x": linear_x,
             "angular_z": angular_z,
             "duration": duration,
             "automatic_stop": True,
+            "returned_immediately": False,
         }
     )
 
@@ -264,15 +568,23 @@ def motion():
 @app.route("/stop", methods=["POST"])
 def stop():
     stop_result = stop_robot()
-    status_code = 200 if stop_result.get("ok") else 503
+
+    status_code = (
+        200
+        if stop_result.get("ok")
+        else 503
+    )
 
     return jsonify(
         {
-            "ok": bool(stop_result.get("ok")),
+            "ok": bool(
+                stop_result.get("ok")
+            ),
             "action": "stop",
             "timestamp": now_iso(),
             "message": (
-                "Zero-velocity command published to ROS2."
+                "Streaming motion cancelled and "
+                "zero velocity published to ROS2."
                 if stop_result.get("ok")
                 else "ROS2 stop publish failed."
             ),
@@ -287,13 +599,25 @@ def main():
         daemon=True,
         name="robot-bridge-ros",
     )
+
+    stream_thread = threading.Thread(
+        target=streaming_motion_loop,
+        daemon=True,
+        name="robot-bridge-streaming-motion",
+    )
+
     ros_thread.start()
+    stream_thread.start()
 
     deadline = time.monotonic() + 5.0
 
-    while not ros_ready and time.monotonic() < deadline:
+    while (
+        not ros_ready
+        and time.monotonic() < deadline
+    ):
         if ros_error:
             break
+
         time.sleep(0.05)
 
     app.run(
