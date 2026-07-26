@@ -10,6 +10,13 @@ from geometry_msgs.msg import Twist
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 
+from speech_service import (
+    SpeechBusyError,
+    SpeechExecutionError,
+    SpeechService,
+    SpeechValidationError,
+)
+
 
 app = Flask(__name__)
 
@@ -41,6 +48,8 @@ motion_state = {
     "last_stop_at": None,
     "watchdog_stop_count": 0,
 }
+
+speech_service = SpeechService()
 
 
 def now_iso():
@@ -430,6 +439,7 @@ def status():
                 STREAM_DEFAULT_TIMEOUT_SECONDS
             ),
             "motion": stream_snapshot,
+            "speech": speech_service.status(),
         }
     )
 
@@ -561,6 +571,68 @@ def motion():
             "duration": duration,
             "automatic_stop": True,
             "returned_immediately": False,
+        }
+    )
+
+
+@app.route("/speak", methods=["POST"])
+def speak():
+    payload = request.get_json(silent=True)
+
+    if not isinstance(payload, dict):
+        return jsonify(
+            {
+                "ok": False,
+                "action": "speak",
+                "timestamp": now_iso(),
+                "error": (
+                    "A JSON object containing text is required."
+                ),
+            }
+        ), 400
+
+    timestamp = now_iso()
+
+    try:
+        result = speech_service.speak(
+            text=payload.get("text"),
+            timestamp=timestamp,
+        )
+    except SpeechValidationError as exc:
+        return jsonify(
+            {
+                "ok": False,
+                "action": "speak",
+                "timestamp": timestamp,
+                "error": str(exc),
+            }
+        ), 400
+    except SpeechBusyError as exc:
+        return jsonify(
+            {
+                "ok": False,
+                "action": "speak",
+                "timestamp": timestamp,
+                "error": str(exc),
+            }
+        ), 409
+    except SpeechExecutionError as exc:
+        return jsonify(
+            {
+                "ok": False,
+                "action": "speak",
+                "timestamp": timestamp,
+                "error": str(exc),
+            }
+        ), 503
+
+    return jsonify(
+        {
+            "ok": True,
+            "action": "speak",
+            "timestamp": timestamp,
+            "message": "Speech played on the Mini Pupper.",
+            "speech_result": result,
         }
     )
 
