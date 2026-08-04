@@ -9,6 +9,10 @@ from flask import Flask, jsonify, request
 from geometry_msgs.msg import Twist
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
+
+from lidar_telemetry import LidarTelemetry
 
 from speech_service import (
     SpeechBusyError,
@@ -50,6 +54,7 @@ motion_state = {
 }
 
 speech_service = SpeechService()
+lidar_telemetry = LidarTelemetry()
 
 
 def now_iso():
@@ -66,8 +71,18 @@ class RobotBridgePublisher(Node):
             10,
         )
 
+        self.lidar_subscription = self.create_subscription(
+            LaserScan,
+            '/scan',
+            lidar_telemetry.update,
+            qos_profile_sensor_data,
+        )
+
         self.get_logger().info(
             f"Robot Bridge publisher ready on {MOTION_TOPIC}"
+        )
+        self.get_logger().info(
+            "Robot Bridge LiDAR telemetry ready on /scan"
         )
 
     def publish_motion(self, linear_x, angular_z):
@@ -442,6 +457,25 @@ def status():
             "speech": speech_service.status(),
         }
     )
+
+
+@app.route("/telemetry/lidar", methods=["GET"])
+def lidar_status():
+    telemetry = lidar_telemetry.snapshot()
+    available = telemetry["available"]
+
+    response = jsonify(
+        {
+            "ok": available,
+            "service": "mini_pupper_robot_bridge",
+            "timestamp": now_iso(),
+            "topic": "/scan",
+            "telemetry": telemetry,
+        }
+    )
+    response.headers["Access-Control-Allow-Origin"] = "*"
+
+    return response, 200 if available else 503
 
 
 @app.route("/motion", methods=["POST"])
