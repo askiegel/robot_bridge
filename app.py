@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import rclpy
 from flask import Flask, jsonify, request
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import Twist
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
@@ -13,6 +14,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
 from lidar_telemetry import LidarTelemetry
+from localization_telemetry import LocalizationTelemetry
 from map_telemetry import SavedMapTelemetry
 
 from speech_service import (
@@ -56,6 +58,7 @@ motion_state = {
 
 speech_service = SpeechService()
 lidar_telemetry = LidarTelemetry()
+localization_telemetry = LocalizationTelemetry()
 map_telemetry = SavedMapTelemetry()
 
 
@@ -83,8 +86,20 @@ class RobotBridgePublisher(Node):
         self.get_logger().info(
             f"Robot Bridge publisher ready on {MOTION_TOPIC}"
         )
+        self.localization_subscription = (
+            self.create_subscription(
+                PoseWithCovarianceStamped,
+                '/amcl_pose',
+                localization_telemetry.update,
+                10,
+            )
+        )
+
         self.get_logger().info(
             "Robot Bridge LiDAR telemetry ready on /scan"
+        )
+        self.get_logger().info(
+            "Robot Bridge localization telemetry ready on /amcl_pose"
         )
 
     def publish_motion(self, linear_x, angular_z):
@@ -491,6 +506,53 @@ def map_status():
         'telemetry': telemetry,
         'timestamp': now_iso(),
         'source': 'validated_saved_map',
+    })
+    response.headers['Access-Control-Allow-Origin'] = '*'
+
+    return response, 200 if available else 503
+
+
+def localization_runtime_active():
+    """Return whether the conservative AMCL node is currently present."""
+    if not ros_ready or publisher_node is None:
+        return False
+
+    try:
+        with publisher_lock:
+            node_names = publisher_node.get_node_names()
+
+        return 'amcl' in {
+            str(name).strip('/')
+            for name in node_names
+        }
+
+    except Exception:
+        return False
+
+
+@app.route("/telemetry/localization", methods=["GET"])
+def localization_status():
+    telemetry = localization_telemetry.snapshot()
+    runtime_active = localization_runtime_active()
+
+    if not runtime_active:
+        telemetry = dict(telemetry)
+        telemetry['available'] = False
+        telemetry['status'] = 'LOCALIZATION_STOPPED'
+        telemetry['pose'] = None
+
+    available = (
+        runtime_active
+        and telemetry['available']
+    )
+
+    response = jsonify({
+        'ok': available,
+        'service': 'mini_pupper_robot_bridge',
+        'runtime_active': runtime_active,
+        'telemetry': telemetry,
+        'timestamp': now_iso(),
+        'topic': '/amcl_pose',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
 
