@@ -13,6 +13,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
 from lidar_telemetry import LidarTelemetry
+from map_telemetry import SavedMapTelemetry
 
 from speech_service import (
     SpeechBusyError,
@@ -55,6 +56,7 @@ motion_state = {
 
 speech_service = SpeechService()
 lidar_telemetry = LidarTelemetry()
+map_telemetry = SavedMapTelemetry()
 
 
 def now_iso():
@@ -474,6 +476,23 @@ def lidar_status():
         }
     )
     response.headers["Access-Control-Allow-Origin"] = "*"
+
+    return response, 200 if available else 503
+
+
+@app.route("/telemetry/map", methods=["GET"])
+def map_status():
+    telemetry = map_telemetry.snapshot()
+    available = telemetry['available']
+
+    response = jsonify({
+        'ok': available,
+        'service': 'mini_pupper_robot_bridge',
+        'telemetry': telemetry,
+        'timestamp': now_iso(),
+        'source': 'validated_saved_map',
+    })
+    response.headers['Access-Control-Allow-Origin'] = '*'
 
     return response, 200 if available else 503
 
