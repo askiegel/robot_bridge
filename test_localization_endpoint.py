@@ -152,6 +152,27 @@ def test_zero_quaternion_is_rejected():
         )
 
 
+def test_localization_cache_clear_discards_pose():
+    monotonic_values = iter([10.0, 10.1, 10.2])
+    telemetry = LocalizationTelemetry(
+        monotonic_clock=lambda: next(monotonic_values),
+    )
+    telemetry.update(make_pose())
+
+    assert telemetry.snapshot()['available'] is True
+
+    telemetry.clear()
+    snapshot = telemetry.snapshot()
+
+    assert snapshot == {
+        'available': False,
+        'status': 'WAITING_FOR_LOCALIZATION',
+        'received_at': None,
+        'age_seconds': None,
+        'pose': None,
+    }
+
+
 def test_localization_endpoint_reports_waiting(monkeypatch):
     telemetry = LocalizationTelemetry(
         monotonic_clock=lambda: 10.0,
@@ -215,7 +236,7 @@ def test_localization_endpoint_returns_pose(monkeypatch):
 def test_cached_pose_is_hidden_when_localization_stops(
     monkeypatch,
 ):
-    monotonic_values = iter([10.0, 10.1])
+    monotonic_values = iter([10.0, 10.1, 10.2])
     telemetry = LocalizationTelemetry(
         monotonic_clock=lambda: next(monotonic_values),
     )
@@ -244,6 +265,13 @@ def test_cached_pose_is_hidden_when_localization_stops(
         'LOCALIZATION_STOPPED'
     )
     assert payload['telemetry']['pose'] is None
+    assert payload['telemetry']['received_at'] is None
+    assert payload['telemetry']['age_seconds'] is None
+
+    internal_snapshot = telemetry.snapshot()
+    assert internal_snapshot['available'] is False
+    assert internal_snapshot['pose'] is None
+    assert internal_snapshot['received_at'] is None
 
 
 def test_localization_endpoint_rejects_post(monkeypatch):

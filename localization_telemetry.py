@@ -148,6 +148,13 @@ class LocalizationTelemetry:
             self._received_at = received_at
             self._received_monotonic = received_monotonic
 
+    def clear(self):
+        """Discard every pose from a previous localization session."""
+        with self._lock:
+            self._pose = None
+            self._received_monotonic = None
+            self._received_at = None
+
     def snapshot(self):
         """Return the latest pose without exposing mutable state."""
         now = self._monotonic_clock()

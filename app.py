@@ -532,14 +532,15 @@ def localization_runtime_active():
 
 @app.route("/telemetry/localization", methods=["GET"])
 def localization_status():
-    telemetry = localization_telemetry.snapshot()
     runtime_active = localization_runtime_active()
 
     if not runtime_active:
-        telemetry = dict(telemetry)
-        telemetry['available'] = False
+        localization_telemetry.clear()
+
+    telemetry = localization_telemetry.snapshot()
+
+    if not runtime_active:
         telemetry['status'] = 'LOCALIZATION_STOPPED'
-        telemetry['pose'] = None
 
     available = (
         runtime_active
