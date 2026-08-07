@@ -851,6 +851,55 @@ def mapping_start():
     }), status_code
 
 
+@app.route(
+    "/mapping/save-candidate",
+    methods=["POST"],
+)
+def mapping_save_candidate():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_save_candidate',
+            'timestamp': timestamp,
+            'error': (
+                'Safety zero could not be published; '
+                'candidate export was not attempted.'
+            ),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+        }), 503
+
+    try:
+        result = mapping_control.save_candidate(
+            timestamp,
+        )
+    except MappingControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_save_candidate',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+        }), 409
+
+    return jsonify({
+        'ok': True,
+        'action': 'mapping_save_candidate',
+        'timestamp': timestamp,
+        'message': (
+            'Mapping stopped and candidate map saved '
+            'for explicit review.'
+        ),
+        'stop_result': stop_result,
+        'mapping': result,
+        'candidate': result['candidate'],
+    }), 201
+
+
 @app.route("/mapping/stop", methods=["POST"])
 def mapping_stop():
     stop_result = stop_robot()

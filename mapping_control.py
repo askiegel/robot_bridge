@@ -4,7 +4,11 @@
 #
 # Copyright (c) 2026 Tony Kiegel
 
+import hashlib
+import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -30,6 +34,9 @@ class MappingControl:
         self,
         launch_path=None,
         log_path=None,
+        candidate_root=None,
+        converter_path=None,
+        command_runner=None,
         process_factory=None,
         process_finder=None,
         identity_checker=None,
@@ -56,6 +63,18 @@ class MappingControl:
             / 'logs'
             / 'mapping_control.log'
         )
+        self._candidate_root = Path(
+            candidate_root
+            or home / 'robot_maps'
+        )
+        self._converter_path = Path(
+            converter_path
+            or '/opt/ros/humble/lib/cartographer_ros/'
+            'cartographer_pbstream_to_ros_map'
+        )
+        self._command_runner = (
+            command_runner or subprocess.run
+        )
 
         self._process_factory = (
             process_factory or subprocess.Popen
@@ -80,6 +99,7 @@ class MappingControl:
         self._started_at = None
         self._last_stopped_at = None
         self._last_error = None
+        self._last_candidate = None
 
     @property
     def command(self):
@@ -131,8 +151,15 @@ class MappingControl:
                 'headless': True,
                 'planning_enabled': False,
                 'control_enabled': False,
-                'map_save_enabled': False,
+                'map_save_enabled': True,
                 'validated_map_mutable': False,
+                'candidate_minimum_submaps': 3,
+                'candidate_minimum_mature_submaps': 2,
+                'candidate_minimum_mature_version': 100,
+                'candidate_root': str(
+                    self._candidate_root
+                ),
+                'last_candidate': self._last_candidate,
             }
 
     def start(self, timestamp):
@@ -199,6 +226,325 @@ class MappingControl:
             result['action'] = 'STARTED'
             result['started'] = True
             return result
+
+    def save_candidate(self, timestamp):
+        """
+        Finish and export the owned session as a candidate.
+
+        The validated map is never read, replaced, promoted,
+        renamed, or removed by this method.
+        """
+        with self._lock:
+            self._refresh_locked()
+
+            if self._process is None:
+                raise MappingControlError(
+                    'No owned mapping session is running.'
+                )
+
+            process = self._process
+            pid = int(process.pid)
+
+            if not self._identity_checker(pid):
+                raise MappingControlError(
+                    'Owned mapping PID identity changed; '
+                    'candidate export was not attempted.'
+                )
+
+            if self._get_process_group(pid) != pid:
+                raise MappingControlError(
+                    'Mapping is not its session leader; '
+                    'candidate export was not attempted.'
+                )
+
+            self._verify_export_tools()
+
+            candidate_name = self._candidate_name(
+                timestamp
+            )
+            final_directory = (
+                self._candidate_root / candidate_name
+            )
+            temporary_directory = (
+                self._candidate_root
+                / f'.{candidate_name}.partial'
+            )
+
+            if (
+                final_directory.exists()
+                or temporary_directory.exists()
+            ):
+                raise MappingControlError(
+                    'Candidate output directory already exists.'
+                )
+
+            temporary_directory.mkdir(
+                parents=False,
+                exist_ok=False,
+            )
+
+            filestem = (
+                temporary_directory / candidate_name
+            )
+            pbstream_path = filestem.with_suffix(
+                '.pbstream'
+            )
+
+            try:
+                trajectory_id = (
+                    self._get_active_trajectory_id()
+                )
+                readiness = (
+                    self._get_submap_readiness(
+                        trajectory_id,
+                    )
+                )
+
+                self._run_service(
+                    [
+                        str(self.ROS2_EXECUTABLE),
+                        'service',
+                        'call',
+                        '/finish_trajectory',
+                        'cartographer_ros_msgs/srv/'
+                        'FinishTrajectory',
+                        (
+                            '{trajectory_id: '
+                            f'{trajectory_id}'
+                            '}'
+                        ),
+                    ],
+                    'FinishTrajectory',
+                )
+
+                self._run_service(
+                    [
+                        str(self.ROS2_EXECUTABLE),
+                        'service',
+                        'call',
+                        '/write_state',
+                        'cartographer_ros_msgs/srv/'
+                        'WriteState',
+                        (
+                            "{filename: '"
+                            f"{pbstream_path}"
+                            "', include_unfinished_submaps: "
+                            'false}'
+                        ),
+                    ],
+                    'WriteState',
+                )
+
+                if (
+                    not pbstream_path.is_file()
+                    or pbstream_path.stat().st_size == 0
+                ):
+                    raise MappingControlError(
+                        'WriteState did not create a PBStream.'
+                    )
+
+                stop_result = self.stop(timestamp)
+
+                self._run_checked(
+                    [
+                        str(self._converter_path),
+                        (
+                            '-pbstream_filename='
+                            f'{pbstream_path}'
+                        ),
+                        f'-map_filestem={filestem}',
+                        '-resolution=0.05',
+                    ],
+                    'PBStream conversion',
+                    timeout=90.0,
+                )
+
+                yaml_path = filestem.with_suffix('.yaml')
+                image_path = filestem.with_suffix('.pgm')
+
+                required = (
+                    pbstream_path,
+                    yaml_path,
+                    image_path,
+                )
+
+                for artifact in required:
+                    if (
+                        not artifact.is_file()
+                        or artifact.stat().st_size == 0
+                    ):
+                        raise MappingControlError(
+                            'Candidate artifact is missing: '
+                            f'{artifact.name}'
+                        )
+
+                yaml_source = yaml_path.read_text(
+                    encoding='utf-8',
+                )
+                normalized_yaml, replacements = (
+                    re.subn(
+                        r'(?m)^image:\s*.+?\s*$',
+                        f'image: {image_path.name}',
+                        yaml_source,
+                        count=1,
+                    )
+                )
+
+                if replacements != 1:
+                    raise MappingControlError(
+                        'Candidate YAML image field '
+                        'could not be normalized.'
+                    )
+
+                yaml_path.write_text(
+                    normalized_yaml.rstrip() + '\n',
+                    encoding='utf-8',
+                )
+
+                resolved_image = (
+                    yaml_path.parent / image_path.name
+                )
+
+                if not resolved_image.is_file():
+                    raise MappingControlError(
+                        'Normalized candidate image '
+                        'reference does not resolve.'
+                    )
+
+                metadata = {
+                    'status': 'CANDIDATE_REVIEW_REQUIRED',
+                    'promoted': False,
+                    'validated_map_changed': False,
+                    'candidate_name': candidate_name,
+                    'created_at': timestamp,
+                    'trajectory_id': trajectory_id,
+                    'submap_readiness': readiness,
+                    'resolution': 0.05,
+                    'frame_id': 'map',
+                    'artifacts': [
+                        artifact.name
+                        for artifact in required
+                    ],
+                }
+
+                metadata_path = (
+                    temporary_directory
+                    / 'CANDIDATE_METADATA.json'
+                )
+                metadata_path.write_text(
+                    json.dumps(
+                        metadata,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + '\n',
+                    encoding='utf-8',
+                )
+
+                checksum_paths = (
+                    *required,
+                    metadata_path,
+                )
+                checksum_lines = []
+
+                for artifact in checksum_paths:
+                    digest = hashlib.sha256(
+                        artifact.read_bytes()
+                    ).hexdigest()
+                    checksum_lines.append(
+                        f'{digest}  {artifact.name}'
+                    )
+
+                checksum_path = (
+                    temporary_directory / 'SHA256SUMS'
+                )
+                checksum_path.write_text(
+                    '\n'.join(checksum_lines) + '\n',
+                    encoding='utf-8',
+                )
+
+                temporary_directory.rename(
+                    final_directory
+                )
+
+                self._last_candidate = {
+                    'name': candidate_name,
+                    'directory': str(final_directory),
+                    'pbstream': str(
+                        final_directory
+                        / pbstream_path.name
+                    ),
+                    'yaml': str(
+                        final_directory
+                        / yaml_path.name
+                    ),
+                    'image': str(
+                        final_directory
+                        / image_path.name
+                    ),
+                    'metadata': str(
+                        final_directory
+                        / metadata_path.name
+                    ),
+                    'checksums': str(
+                        final_directory
+                        / checksum_path.name
+                    ),
+                    'status': (
+                        'CANDIDATE_REVIEW_REQUIRED'
+                    ),
+                    'promoted': False,
+                }
+                self._last_error = None
+
+                result = self.snapshot()
+                result['action'] = 'CANDIDATE_SAVED'
+                result['saved'] = True
+                result['candidate'] = (
+                    self._last_candidate
+                )
+                result['stopped_pid'] = (
+                    stop_result.get('stopped_pid')
+                )
+                return result
+
+            except Exception as exc:
+                try:
+                    if self._process is not None:
+                        self.stop(timestamp)
+                except Exception:
+                    pass
+
+                if temporary_directory.exists():
+                    resolved_temporary = (
+                        temporary_directory.resolve()
+                    )
+                    resolved_root = (
+                        self._candidate_root.resolve()
+                    )
+
+                    if (
+                        resolved_temporary.parent
+                        == resolved_root
+                        and resolved_temporary.name.startswith(
+                            '.mayday_map_candidate_'
+                        )
+                        and resolved_temporary.name.endswith(
+                            '.partial'
+                        )
+                    ):
+                        shutil.rmtree(
+                            resolved_temporary
+                        )
+
+                self._last_error = str(exc)
+
+                if isinstance(exc, MappingControlError):
+                    raise
+
+                raise MappingControlError(
+                    f'Candidate export failed: {exc}'
+                ) from exc
 
     def stop(self, timestamp):
         """Stop only the mapping session this object owns."""
@@ -275,6 +621,227 @@ class MappingControl:
             self.stop('ROBOT_BRIDGE_SHUTDOWN')
         except Exception:
             pass
+
+    @staticmethod
+    def _candidate_name(timestamp):
+        match = re.match(
+            r'^(\d{4})-(\d{2})-(\d{2})'
+            r'T(\d{2}):(\d{2}):(\d{2})',
+            str(timestamp),
+        )
+
+        if match is None:
+            raise MappingControlError(
+                'Candidate timestamp is invalid.'
+            )
+
+        fields = match.groups()
+        compact_date = ''.join(fields[:3])
+        compact_time = ''.join(fields[3:])
+
+        return (
+            'mayday_map_candidate_'
+            f'{compact_date}T{compact_time}Z'
+        )
+
+    def _verify_export_tools(self):
+        if (
+            not self._candidate_root.is_dir()
+            or not os.access(
+                self._candidate_root,
+                os.W_OK,
+            )
+        ):
+            raise MappingControlError(
+                'Candidate map root is unavailable.'
+            )
+
+        if (
+            not self._converter_path.is_file()
+            or not os.access(
+                self._converter_path,
+                os.X_OK,
+            )
+        ):
+            raise MappingControlError(
+                'PBStream converter is unavailable.'
+            )
+
+    def _run_checked(
+        self,
+        command,
+        operation,
+        timeout,
+    ):
+        try:
+            completed = self._command_runner(
+                command,
+                cwd=str(Path.home()),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MappingControlError(
+                f'{operation} timed out.'
+            ) from exc
+
+        if completed.returncode != 0:
+            output = str(
+                getattr(completed, 'stdout', '')
+            ).strip()
+
+            raise MappingControlError(
+                f'{operation} failed'
+                + (f': {output}' if output else '.')
+            )
+
+        return str(
+            getattr(completed, 'stdout', '')
+        )
+
+    def _run_service(self, command, operation):
+        output = self._run_checked(
+            command,
+            operation,
+            timeout=45.0,
+        )
+
+        if not re.search(r'code=0\b', output):
+            raise MappingControlError(
+                f'{operation} returned an error: '
+                f'{output.strip()}'
+            )
+
+        return output
+
+    def _get_submap_readiness(
+        self,
+        trajectory_id,
+    ):
+        output = self._run_checked(
+            [
+                str(self.ROS2_EXECUTABLE),
+                'topic',
+                'echo',
+                '/submap_list',
+                'cartographer_ros_msgs/msg/SubmapList',
+                '--once',
+            ],
+            'Submap readiness check',
+            timeout=45.0,
+        )
+
+        blocks = re.findall(
+            r'(?ms)^- trajectory_id:\s*(-?\d+)'
+            r'.*?^\s+submap_index:\s*(\d+)'
+            r'.*?^\s+submap_version:\s*(\d+)',
+            output,
+        )
+
+        matching = [
+            {
+                'index': int(index),
+                'version': int(version),
+            }
+            for found_trajectory, index, version
+            in blocks
+            if int(found_trajectory) == trajectory_id
+        ]
+
+        mature = [
+            submap
+            for submap in matching
+            if submap['version'] >= 100
+        ]
+
+        readiness = {
+            'trajectory_id': trajectory_id,
+            'submap_count': len(matching),
+            'mature_submap_count': len(mature),
+            'minimum_submap_count': 3,
+            'minimum_mature_submap_count': 2,
+            'minimum_mature_version': 100,
+            'submaps': matching,
+        }
+
+        if (
+            len(matching) < 3
+            or len(mature) < 2
+        ):
+            raise MappingControlError(
+                'Mapping is not ready for candidate '
+                'export: '
+                f'{len(matching)} submaps, '
+                f'{len(mature)} mature submaps; '
+                'at least 3 submaps and 2 mature '
+                'submaps are required.'
+            )
+
+        return readiness
+
+    def _get_active_trajectory_id(self):
+        output = self._run_service(
+            [
+                str(self.ROS2_EXECUTABLE),
+                'service',
+                'call',
+                '/get_trajectory_states',
+                'cartographer_ros_msgs/srv/'
+                'GetTrajectoryStates',
+                '{}',
+            ],
+            'GetTrajectoryStates',
+        )
+
+        identifiers = re.findall(
+            r'trajectory_id=\[([^\]]*)\]',
+            output,
+        )
+        states = re.findall(
+            r'trajectory_state=\[([^\]]*)\]',
+            output,
+        )
+
+        if not identifiers or not states:
+            raise MappingControlError(
+                'Trajectory state response was invalid.'
+            )
+
+        trajectory_ids = [
+            int(value)
+            for value in re.findall(
+                r'-?\d+',
+                identifiers[-1],
+            )
+        ]
+        trajectory_states = [
+            int(value)
+            for value in re.findall(
+                r'\d+',
+                states[-1],
+            )
+        ]
+
+        active = [
+            trajectory_id
+            for trajectory_id, state
+            in zip(
+                trajectory_ids,
+                trajectory_states,
+            )
+            if state == 0
+        ]
+
+        if len(active) != 1:
+            raise MappingControlError(
+                'Exactly one active trajectory is required.'
+            )
+
+        return active[0]
 
     def _verify_artifacts(self):
         if not self.ROS2_EXECUTABLE.is_file():
