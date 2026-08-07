@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import atexit
 import threading
 import time
 from datetime import datetime, timezone
@@ -14,6 +15,11 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
 from lidar_telemetry import LidarTelemetry
+from localization_control import (
+    LocalizationConflictError,
+    LocalizationControl,
+    LocalizationControlError,
+)
 from localization_telemetry import LocalizationTelemetry
 from map_telemetry import SavedMapTelemetry
 
@@ -59,7 +65,10 @@ motion_state = {
 speech_service = SpeechService()
 lidar_telemetry = LidarTelemetry()
 localization_telemetry = LocalizationTelemetry()
+localization_control = LocalizationControl()
 map_telemetry = SavedMapTelemetry()
+
+atexit.register(localization_control.shutdown)
 
 
 def now_iso():
@@ -750,6 +759,121 @@ def speak():
             "message": "Speech played on the Mini Pupper.",
             "speech_result": result,
         }
+    )
+
+
+@app.route("/localization/status", methods=["GET"])
+def localization_control_status():
+    return jsonify({
+        'ok': True,
+        'service': 'mini_pupper_robot_bridge',
+        'timestamp': now_iso(),
+        'localization': localization_control.snapshot(),
+    })
+
+
+@app.route("/localization/start", methods=["POST"])
+def localization_start():
+    stop_result = stop_robot()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'localization_start',
+            'timestamp': now_iso(),
+            'error': (
+                'Safety zero could not be published; '
+                'localization was not started.'
+            ),
+            'stop_result': stop_result,
+        }), 503
+
+    localization_telemetry.clear()
+    timestamp = now_iso()
+
+    try:
+        result = localization_control.start(
+            timestamp,
+        )
+    except LocalizationConflictError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'localization_start',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'localization': (
+                localization_control.snapshot()
+            ),
+        }), 409
+    except LocalizationControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'localization_start',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'localization': (
+                localization_control.snapshot()
+            ),
+        }), 503
+
+    status_code = (
+        201
+        if result.get('started')
+        else 200
+    )
+
+    return jsonify({
+        'ok': True,
+        'action': 'localization_start',
+        'timestamp': timestamp,
+        'message': (
+            'Conservative localization started.'
+            if result.get('started')
+            else 'Conservative localization is already running.'
+        ),
+        'stop_result': stop_result,
+        'localization': result,
+    }), status_code
+
+
+@app.route("/localization/stop", methods=["POST"])
+def localization_stop():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    try:
+        result = localization_control.stop(
+            timestamp,
+        )
+    except LocalizationControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'localization_stop',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'localization': (
+                localization_control.snapshot()
+            ),
+        }), 503
+
+    localization_telemetry.clear()
+
+    return jsonify({
+        'ok': bool(stop_result.get('ok')),
+        'action': 'localization_stop',
+        'timestamp': timestamp,
+        'message': (
+            'Conservative localization stopped.'
+            if result.get('stopped')
+            else 'Conservative localization was already stopped.'
+        ),
+        'stop_result': stop_result,
+        'localization': result,
+    }), (
+        200
+        if stop_result.get('ok')
+        else 503
     )
 
 
