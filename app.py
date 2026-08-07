@@ -21,6 +21,11 @@ from localization_control import (
     LocalizationControlError,
 )
 from localization_telemetry import LocalizationTelemetry
+from mapping_control import (
+    MappingConflictError,
+    MappingControl,
+    MappingControlError,
+)
 from map_telemetry import SavedMapTelemetry
 
 from speech_service import (
@@ -66,9 +71,11 @@ speech_service = SpeechService()
 lidar_telemetry = LidarTelemetry()
 localization_telemetry = LocalizationTelemetry()
 localization_control = LocalizationControl()
+mapping_control = MappingControl()
 map_telemetry = SavedMapTelemetry()
 
 atexit.register(localization_control.shutdown)
+atexit.register(mapping_control.shutdown)
 
 
 def now_iso():
@@ -759,6 +766,123 @@ def speak():
             "message": "Speech played on the Mini Pupper.",
             "speech_result": result,
         }
+    )
+
+
+@app.route("/mapping/status", methods=["GET"])
+def mapping_control_status():
+    return jsonify({
+        'ok': True,
+        'service': 'mini_pupper_robot_bridge',
+        'timestamp': now_iso(),
+        'mapping': mapping_control.snapshot(),
+    })
+
+
+@app.route("/mapping/start", methods=["POST"])
+def mapping_start():
+    stop_result = stop_robot()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_start',
+            'timestamp': now_iso(),
+            'error': (
+                'Safety zero could not be published; '
+                'mapping was not started.'
+            ),
+            'stop_result': stop_result,
+        }), 503
+
+    timestamp = now_iso()
+
+    if localization_control.snapshot().get('running'):
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_start',
+            'timestamp': timestamp,
+            'error': (
+                'Localization is running; mapping was '
+                'not started.'
+            ),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+        }), 409
+
+    try:
+        result = mapping_control.start(timestamp)
+    except MappingConflictError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_start',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+        }), 409
+    except MappingControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_start',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+        }), 503
+
+    status_code = (
+        201
+        if result.get('started')
+        else 200
+    )
+
+    return jsonify({
+        'ok': True,
+        'action': 'mapping_start',
+        'timestamp': timestamp,
+        'message': (
+            'Headless mapping started.'
+            if result.get('started')
+            else 'Headless mapping is already running.'
+        ),
+        'stop_result': stop_result,
+        'mapping': result,
+    }), status_code
+
+
+@app.route("/mapping/stop", methods=["POST"])
+def mapping_stop():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    try:
+        result = mapping_control.stop(timestamp)
+    except MappingControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_stop',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+        }), 503
+
+    return jsonify({
+        'ok': bool(stop_result.get('ok')),
+        'action': 'mapping_stop',
+        'timestamp': timestamp,
+        'message': (
+            'Headless mapping stopped without saving.'
+            if result.get('stopped')
+            else 'Headless mapping was already stopped.'
+        ),
+        'stop_result': stop_result,
+        'mapping': result,
+    }), (
+        200
+        if stop_result.get('ok')
+        else 503
     )
 
 
