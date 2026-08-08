@@ -334,6 +334,29 @@ class SavedMapTelemetry:
             },
         }
 
+    def reload(self):
+        """
+        Atomically replace the cached map from disk.
+
+        The existing in-memory map remains available if loading the
+        replacement fails.
+        """
+        with self._lock:
+            occupancy_map = self._load()
+            loaded_at = self._utc_clock().isoformat()
+
+            self._map = occupancy_map
+            self._loaded_at = loaded_at
+            self._error = None
+
+            return {
+                'available': True,
+                'status': 'READY',
+                'loaded_at': loaded_at,
+                'error': None,
+                'map': dict(occupancy_map),
+            }
+
     def snapshot(self):
         """Return a copy of the cached map or an unavailable result."""
         with self._lock:

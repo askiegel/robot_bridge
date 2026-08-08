@@ -36,6 +36,11 @@ from mapping_control import (
     MappingControlError,
 )
 from map_telemetry import SavedMapTelemetry
+from map_promotion import (
+    MapPromotion,
+    MapPromotionConflictError,
+    MapPromotionError,
+)
 
 from speech_service import (
     SpeechBusyError,
@@ -85,6 +90,14 @@ mapping_control = MappingControl()
 map_telemetry = SavedMapTelemetry()
 candidate_map_telemetry = CandidateMapTelemetry(
     validated_map_telemetry=map_telemetry,
+)
+map_promotion = MapPromotion(
+    candidate_map_telemetry=candidate_map_telemetry,
+    validated_map_telemetry=map_telemetry,
+    runtime_state_provider=lambda: {
+        'mapping': mapping_control.snapshot(),
+        'localization': localization_control.snapshot(),
+    },
 )
 
 atexit.register(localization_control.shutdown)
@@ -637,6 +650,117 @@ def candidate_map_status():
     response.headers['Access-Control-Allow-Origin'] = '*'
 
     return response, 200 if available else 503
+
+
+@app.route(
+    "/map/promote-candidate",
+    methods=["POST"],
+)
+def promote_candidate_map():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'map_promote_candidate',
+            'timestamp': timestamp,
+            'error': (
+                'Safety zero could not be published; '
+                'candidate promotion was not attempted.'
+            ),
+            'stop_result': stop_result,
+            'promotion': map_promotion.snapshot(),
+        }), 503
+
+    payload = request.get_json(
+        silent=True
+    )
+
+    if not isinstance(payload, dict):
+        return jsonify({
+            'ok': False,
+            'action': 'map_promote_candidate',
+            'timestamp': timestamp,
+            'error': 'A JSON request body is required.',
+            'stop_result': stop_result,
+            'promotion': map_promotion.snapshot(),
+        }), 400
+
+    allowed_keys = {
+        'candidate_name',
+        'confirmation',
+    }
+
+    if set(payload) != allowed_keys:
+        return jsonify({
+            'ok': False,
+            'action': 'map_promote_candidate',
+            'timestamp': timestamp,
+            'error': (
+                'Exactly candidate_name and confirmation '
+                'must be supplied.'
+            ),
+            'stop_result': stop_result,
+            'promotion': map_promotion.snapshot(),
+        }), 400
+
+    if (
+        mapping_control.snapshot().get('running')
+        or localization_control.snapshot().get('running')
+    ):
+        return jsonify({
+            'ok': False,
+            'action': 'map_promote_candidate',
+            'timestamp': timestamp,
+            'error': (
+                'Mapping or localization is active; '
+                'candidate promotion is blocked.'
+            ),
+            'stop_result': stop_result,
+            'promotion': map_promotion.snapshot(),
+        }), 409
+
+    try:
+        result = map_promotion.promote(
+            candidate_name=payload.get(
+                'candidate_name'
+            ),
+            confirmation=payload.get(
+                'confirmation'
+            ),
+            timestamp=timestamp,
+        )
+    except MapPromotionConflictError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'map_promote_candidate',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'promotion': map_promotion.snapshot(),
+        }), 409
+    except MapPromotionError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'map_promote_candidate',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'promotion': map_promotion.snapshot(),
+        }), 400
+
+    return jsonify({
+        'ok': True,
+        'action': 'map_promote_candidate',
+        'timestamp': timestamp,
+        'message': (
+            'Reviewed candidate was promoted with a '
+            'validated-map backup.'
+        ),
+        'stop_result': stop_result,
+        'promotion': result,
+    }), 201
 
 
 @app.route("/telemetry/localization", methods=["GET"])
