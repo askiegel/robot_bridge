@@ -14,6 +14,9 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
+from candidate_map_telemetry import (
+    CandidateMapTelemetry,
+)
 from lidar_telemetry import LidarTelemetry
 from localization_control import (
     LocalizationConflictError,
@@ -73,6 +76,9 @@ localization_telemetry = LocalizationTelemetry()
 localization_control = LocalizationControl()
 mapping_control = MappingControl()
 map_telemetry = SavedMapTelemetry()
+candidate_map_telemetry = CandidateMapTelemetry(
+    validated_map_telemetry=map_telemetry,
+)
 
 atexit.register(localization_control.shutdown)
 atexit.register(mapping_control.shutdown)
@@ -544,6 +550,26 @@ def localization_runtime_active():
 
     except Exception:
         return False
+
+
+@app.route(
+    "/telemetry/map-candidates",
+    methods=["GET"],
+)
+def candidate_map_status():
+    telemetry = candidate_map_telemetry.snapshot()
+    available = telemetry['available']
+
+    response = jsonify({
+        'ok': available,
+        'service': 'mini_pupper_robot_bridge',
+        'telemetry': telemetry,
+        'timestamp': now_iso(),
+        'source': 'candidate_map_review',
+    })
+    response.headers['Access-Control-Allow-Origin'] = '*'
+
+    return response, 200 if available else 503
 
 
 @app.route("/telemetry/localization", methods=["GET"])

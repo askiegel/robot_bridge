@@ -89,13 +89,14 @@ class SavedMapTelemetry:
 
         required = {
             'image',
-            'mode',
             'resolution',
             'origin',
             'negate',
             'occupied_thresh',
             'free_thresh',
         }
+
+        metadata.setdefault('mode', 'trinary')
 
         missing = sorted(required - metadata.keys())
 
