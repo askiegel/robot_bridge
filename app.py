@@ -9,8 +9,13 @@ import rclpy
 from flask import Flask, jsonify, request
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import OccupancyGrid
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy
+from rclpy.qos import HistoryPolicy
+from rclpy.qos import QoSProfile
+from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
@@ -18,6 +23,7 @@ from candidate_map_telemetry import (
     CandidateMapTelemetry,
 )
 from lidar_telemetry import LidarTelemetry
+from live_mapping_telemetry import LiveMappingTelemetry
 from localization_control import (
     LocalizationConflictError,
     LocalizationControl,
@@ -72,6 +78,7 @@ motion_state = {
 
 speech_service = SpeechService()
 lidar_telemetry = LidarTelemetry()
+live_mapping_telemetry = LiveMappingTelemetry()
 localization_telemetry = LocalizationTelemetry()
 localization_control = LocalizationControl()
 mapping_control = MappingControl()
@@ -117,11 +124,30 @@ class RobotBridgePublisher(Node):
             )
         )
 
+        live_map_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        self.live_mapping_subscription = (
+            self.create_subscription(
+                OccupancyGrid,
+                '/map',
+                live_mapping_telemetry.update,
+                live_map_qos,
+            )
+        )
+
         self.get_logger().info(
             "Robot Bridge LiDAR telemetry ready on /scan"
         )
         self.get_logger().info(
             "Robot Bridge localization telemetry ready on /amcl_pose"
+        )
+        self.get_logger().info(
+            "Robot Bridge live mapping telemetry ready on /map"
         )
 
     def publish_motion(self, linear_x, angular_z):
@@ -517,6 +543,47 @@ def lidar_status():
     return response, 200 if available else 503
 
 
+@app.route(
+    "/telemetry/mapping-map",
+    methods=["GET"],
+)
+def live_mapping_status():
+    mapping = mapping_control.snapshot()
+    runtime_active = bool(
+        mapping.get('running')
+        and mapping.get('owned')
+    )
+
+    if not runtime_active:
+        live_mapping_telemetry.clear()
+
+    telemetry = live_mapping_telemetry.snapshot()
+
+    if not runtime_active:
+        telemetry['status'] = 'MAPPING_STOPPED'
+
+    available = (
+        runtime_active
+        and telemetry['available']
+    )
+
+    response = jsonify({
+        'ok': available,
+        'service': 'mini_pupper_robot_bridge',
+        'runtime_active': runtime_active,
+        'mapping': mapping,
+        'telemetry': telemetry,
+        'timestamp': now_iso(),
+        'topic': '/map',
+        'source': 'live_cartographer_map',
+        'read_only': True,
+        'authoritative': False,
+    })
+    response.headers['Access-Control-Allow-Origin'] = '*'
+
+    return response, 200 if available else 503
+
+
 @app.route("/telemetry/map", methods=["GET"])
 def map_status():
     telemetry = map_telemetry.snapshot()
@@ -836,6 +903,9 @@ def mapping_start():
             'mapping': mapping_control.snapshot(),
         }), 409
 
+    if not mapping_control.snapshot().get('running'):
+        live_mapping_telemetry.clear()
+
     try:
         result = mapping_control.start(timestamp)
     except MappingConflictError as exc:
@@ -903,6 +973,9 @@ def mapping_save_candidate():
             timestamp,
         )
     except MappingControlError as exc:
+        if not mapping_control.snapshot().get('running'):
+            live_mapping_telemetry.clear()
+
         return jsonify({
             'ok': False,
             'action': 'mapping_save_candidate',
@@ -911,6 +984,8 @@ def mapping_save_candidate():
             'stop_result': stop_result,
             'mapping': mapping_control.snapshot(),
         }), 409
+
+    live_mapping_telemetry.clear()
 
     return jsonify({
         'ok': True,
@@ -934,6 +1009,9 @@ def mapping_stop():
     try:
         result = mapping_control.stop(timestamp)
     except MappingControlError as exc:
+        if not mapping_control.snapshot().get('running'):
+            live_mapping_telemetry.clear()
+
         return jsonify({
             'ok': False,
             'action': 'mapping_stop',
@@ -942,6 +1020,8 @@ def mapping_stop():
             'stop_result': stop_result,
             'mapping': mapping_control.snapshot(),
         }), 503
+
+    live_mapping_telemetry.clear()
 
     return jsonify({
         'ok': bool(stop_result.get('ok')),
