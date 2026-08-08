@@ -9,6 +9,7 @@ import rclpy
 from flask import Flask, jsonify, request
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import Twist
+from cartographer_ros_msgs.msg import SubmapList
 from nav_msgs.msg import OccupancyGrid
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
@@ -24,6 +25,9 @@ from candidate_map_telemetry import (
 )
 from lidar_telemetry import LidarTelemetry
 from live_mapping_telemetry import LiveMappingTelemetry
+from mapping_readiness_telemetry import (
+    MappingReadinessTelemetry,
+)
 from localization_control import (
     LocalizationConflictError,
     LocalizationControl,
@@ -87,6 +91,26 @@ live_mapping_telemetry = LiveMappingTelemetry()
 localization_telemetry = LocalizationTelemetry()
 localization_control = LocalizationControl()
 mapping_control = MappingControl()
+mapping_requirements = mapping_control.snapshot()
+mapping_readiness_telemetry = (
+    MappingReadinessTelemetry(
+        minimum_submaps=(
+            mapping_requirements[
+                'candidate_minimum_submaps'
+            ]
+        ),
+        minimum_mature_submaps=(
+            mapping_requirements[
+                'candidate_minimum_mature_submaps'
+            ]
+        ),
+        minimum_mature_version=(
+            mapping_requirements[
+                'candidate_minimum_mature_version'
+            ]
+        ),
+    )
+)
 map_telemetry = SavedMapTelemetry()
 candidate_map_telemetry = CandidateMapTelemetry(
     validated_map_telemetry=map_telemetry,
@@ -153,6 +177,15 @@ class RobotBridgePublisher(Node):
             )
         )
 
+        self.mapping_readiness_subscription = (
+            self.create_subscription(
+                SubmapList,
+                '/submap_list',
+                mapping_readiness_telemetry.update,
+                10,
+            )
+        )
+
         self.get_logger().info(
             "Robot Bridge LiDAR telemetry ready on /scan"
         )
@@ -161,6 +194,10 @@ class RobotBridgePublisher(Node):
         )
         self.get_logger().info(
             "Robot Bridge live mapping telemetry ready on /map"
+        )
+        self.get_logger().info(
+            "Robot Bridge mapping readiness ready on "
+            "/submap_list"
         )
 
     def publish_motion(self, linear_x, angular_z):
@@ -986,13 +1023,32 @@ def speak():
     )
 
 
+def mapping_snapshot_with_readiness():
+    """Return mapping ownership and live readiness."""
+    mapping = mapping_control.snapshot()
+    runtime_active = bool(
+        mapping.get('running')
+        and mapping.get('owned')
+    )
+
+    if not runtime_active:
+        mapping_readiness_telemetry.clear()
+
+    mapping['readiness'] = (
+        mapping_readiness_telemetry.snapshot(
+            runtime_active=runtime_active,
+        )
+    )
+    return mapping
+
+
 @app.route("/mapping/status", methods=["GET"])
 def mapping_control_status():
     return jsonify({
         'ok': True,
         'service': 'mini_pupper_robot_bridge',
         'timestamp': now_iso(),
-        'mapping': mapping_control.snapshot(),
+        'mapping': mapping_snapshot_with_readiness(),
     })
 
 
@@ -1029,6 +1085,7 @@ def mapping_start():
 
     if not mapping_control.snapshot().get('running'):
         live_mapping_telemetry.clear()
+        mapping_readiness_telemetry.clear()
 
     try:
         result = mapping_control.start(timestamp)
@@ -1099,6 +1156,7 @@ def mapping_save_candidate():
     except MappingControlError as exc:
         if not mapping_control.snapshot().get('running'):
             live_mapping_telemetry.clear()
+            mapping_readiness_telemetry.clear()
 
         return jsonify({
             'ok': False,
@@ -1110,6 +1168,7 @@ def mapping_save_candidate():
         }), 409
 
     live_mapping_telemetry.clear()
+    mapping_readiness_telemetry.clear()
 
     return jsonify({
         'ok': True,
@@ -1135,6 +1194,7 @@ def mapping_stop():
     except MappingControlError as exc:
         if not mapping_control.snapshot().get('running'):
             live_mapping_telemetry.clear()
+            mapping_readiness_telemetry.clear()
 
         return jsonify({
             'ok': False,
@@ -1146,6 +1206,7 @@ def mapping_stop():
         }), 503
 
     live_mapping_telemetry.clear()
+    mapping_readiness_telemetry.clear()
 
     return jsonify({
         'ok': bool(stop_result.get('ok')),
