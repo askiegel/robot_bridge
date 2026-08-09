@@ -52,6 +52,13 @@ from planning_path_service import (
     PlanningPathUnavailableError,
     PlanningPathValidationError,
 )
+from planning_localization_initializer import (
+    PlanningLocalizationConflictError,
+    PlanningLocalizationError,
+    PlanningLocalizationInitializer,
+    PlanningLocalizationTimeoutError,
+    PlanningLocalizationUnavailableError,
+)
 from map_telemetry import SavedMapTelemetry
 from map_promotion import (
     MapPromotion,
@@ -161,6 +168,14 @@ class RobotBridgePublisher(Node):
         self.planning_path_service = (
             PlanningPathService(self)
         )
+        self.planning_localization_initializer = (
+            PlanningLocalizationInitializer(
+                self,
+                pose_clearer=(
+                    localization_telemetry.clear
+                ),
+            )
+        )
 
         self.lidar_subscription = self.create_subscription(
             LaserScan,
@@ -218,6 +233,12 @@ class RobotBridgePublisher(Node):
         self.get_logger().info(
             "Robot Bridge mapping readiness ready on "
             "/submap_list"
+        )
+
+    def initialize_planning_localization(self):
+        return (
+            self.planning_localization_initializer
+            .initialize()
         )
 
     def compute_path(self, payload):
@@ -1360,6 +1381,148 @@ def planning_start():
         'stop_result': stop_result,
         'planning': result,
     }), status_code
+
+
+@app.route(
+    "/planning/initialize-localization",
+    methods=["POST"],
+)
+def planning_initialize_localization():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': (
+                'planning_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                'Safety zero could not be published; '
+                'localization was not initialized.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 503
+
+    planning = planning_control.snapshot()
+
+    if (
+        not planning.get('running')
+        or not planning.get('owned')
+    ):
+        return jsonify({
+            'ok': False,
+            'action': (
+                'planning_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                'Owned planning runtime is not active.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 409
+
+    if not ros_ready or publisher_node is None:
+        return jsonify({
+            'ok': False,
+            'action': (
+                'planning_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                ros_error
+                or 'ROS2 publisher is not ready.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 503
+
+    payload = request.get_json(silent=True)
+
+    if payload not in (None, {}):
+        return jsonify({
+            'ok': False,
+            'action': (
+                'planning_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                'Planning localization initialization '
+                'does not accept request parameters.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 400
+
+    localization_telemetry.clear()
+
+    try:
+        result = (
+            publisher_node
+            .initialize_planning_localization()
+        )
+    except PlanningLocalizationConflictError as exc:
+        return jsonify({
+            'ok': False,
+            'action': (
+                'planning_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 409
+    except PlanningLocalizationUnavailableError as exc:
+        return jsonify({
+            'ok': False,
+            'action': (
+                'planning_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 503
+    except PlanningLocalizationTimeoutError as exc:
+        return jsonify({
+            'ok': False,
+            'action': (
+                'planning_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 504
+    except PlanningLocalizationError as exc:
+        return jsonify({
+            'ok': False,
+            'action': (
+                'planning_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 422
+
+    return jsonify({
+        'ok': True,
+        'action': (
+            'planning_initialize_localization'
+        ),
+        'timestamp': timestamp,
+        'message': (
+            'AMCL global localization and stationary '
+            'scan updates were requested.'
+        ),
+        'stop_result': stop_result,
+        'planning': planning,
+        'initialization': result,
+    }), 200
 
 
 @app.route(
