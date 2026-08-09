@@ -44,6 +44,14 @@ from planning_control import (
     PlanningControl,
     PlanningControlError,
 )
+from planning_path_service import (
+    PlanningPathConflictError,
+    PlanningPathError,
+    PlanningPathService,
+    PlanningPathTimeoutError,
+    PlanningPathUnavailableError,
+    PlanningPathValidationError,
+)
 from map_telemetry import SavedMapTelemetry
 from map_promotion import (
     MapPromotion,
@@ -150,6 +158,10 @@ class RobotBridgePublisher(Node):
             10,
         )
 
+        self.planning_path_service = (
+            PlanningPathService(self)
+        )
+
         self.lidar_subscription = self.create_subscription(
             LaserScan,
             '/scan',
@@ -206,6 +218,11 @@ class RobotBridgePublisher(Node):
         self.get_logger().info(
             "Robot Bridge mapping readiness ready on "
             "/submap_list"
+        )
+
+    def compute_path(self, payload):
+        return self.planning_path_service.compute(
+            payload
         )
 
     def publish_motion(self, linear_x, angular_z):
@@ -1343,6 +1360,124 @@ def planning_start():
         'stop_result': stop_result,
         'planning': result,
     }), status_code
+
+
+@app.route(
+    "/planning/compute-path",
+    methods=["POST"],
+)
+def planning_compute_path():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_compute_path',
+            'timestamp': timestamp,
+            'error': (
+                'Safety zero could not be published; '
+                'no path was requested.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 503
+
+    planning = planning_control.snapshot()
+
+    if (
+        not planning.get('running')
+        or not planning.get('owned')
+    ):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_compute_path',
+            'timestamp': timestamp,
+            'error': (
+                'Owned planning runtime is not '
+                'active.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 409
+
+    if not ros_ready or publisher_node is None:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_compute_path',
+            'timestamp': timestamp,
+            'error': (
+                ros_error
+                or 'ROS2 publisher is not ready.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 503
+
+    payload = request.get_json(silent=True)
+
+    try:
+        result = publisher_node.compute_path(
+            payload
+        )
+    except PlanningPathValidationError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_compute_path',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 400
+    except PlanningPathConflictError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_compute_path',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 409
+    except PlanningPathUnavailableError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_compute_path',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 503
+    except PlanningPathTimeoutError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_compute_path',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 504
+    except PlanningPathError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_compute_path',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 422
+
+    return jsonify({
+        'ok': True,
+        'action': 'planning_compute_path',
+        'timestamp': timestamp,
+        'message': (
+            'A read-only path was computed. '
+            'The path was not executed.'
+        ),
+        'stop_result': stop_result,
+        'planning': planning,
+        'path': result,
+    }), 200
 
 
 @app.route("/planning/stop", methods=["POST"])
