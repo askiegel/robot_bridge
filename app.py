@@ -39,6 +39,11 @@ from mapping_control import (
     MappingControl,
     MappingControlError,
 )
+from planning_control import (
+    PlanningConflictError,
+    PlanningControl,
+    PlanningControlError,
+)
 from map_telemetry import SavedMapTelemetry
 from map_promotion import (
     MapPromotion,
@@ -91,6 +96,7 @@ live_mapping_telemetry = LiveMappingTelemetry()
 localization_telemetry = LocalizationTelemetry()
 localization_control = LocalizationControl()
 mapping_control = MappingControl()
+planning_control = PlanningControl()
 mapping_requirements = mapping_control.snapshot()
 mapping_readiness_telemetry = (
     MappingReadinessTelemetry(
@@ -121,11 +127,13 @@ map_promotion = MapPromotion(
     runtime_state_provider=lambda: {
         'mapping': mapping_control.snapshot(),
         'localization': localization_control.snapshot(),
+        'planning': planning_control.snapshot(),
     },
 )
 
 atexit.register(localization_control.shutdown)
 atexit.register(mapping_control.shutdown)
+atexit.register(planning_control.shutdown)
 
 
 def now_iso():
@@ -1083,6 +1091,19 @@ def mapping_start():
             'mapping': mapping_control.snapshot(),
         }), 409
 
+    if planning_control.snapshot().get('running'):
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_start',
+            'timestamp': timestamp,
+            'error': (
+                'Planning is running; mapping was '
+                'not started.'
+            ),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+        }), 409
+
     if not mapping_control.snapshot().get('running'):
         live_mapping_telemetry.clear()
         mapping_readiness_telemetry.clear()
@@ -1226,6 +1247,141 @@ def mapping_stop():
     )
 
 
+@app.route("/planning/status", methods=["GET"])
+def planning_control_status():
+    return jsonify({
+        'ok': True,
+        'service': 'mini_pupper_robot_bridge',
+        'timestamp': now_iso(),
+        'planning': planning_control.snapshot(),
+    })
+
+
+@app.route("/planning/start", methods=["POST"])
+def planning_start():
+    stop_result = stop_robot()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_start',
+            'timestamp': now_iso(),
+            'error': (
+                'Safety zero could not be published; '
+                'planning was not started.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 503
+
+    timestamp = now_iso()
+
+    if mapping_control.snapshot().get('running'):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_start',
+            'timestamp': timestamp,
+            'error': (
+                'Mapping is running; planning was '
+                'not started.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 409
+
+    if localization_control.snapshot().get('running'):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_start',
+            'timestamp': timestamp,
+            'error': (
+                'Standalone localization is running; '
+                'planning was not started.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 409
+
+    localization_telemetry.clear()
+
+    try:
+        result = planning_control.start(timestamp)
+    except PlanningConflictError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_start',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 409
+    except PlanningControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_start',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 503
+
+    status_code = (
+        201
+        if result.get('started')
+        else 200
+    )
+
+    return jsonify({
+        'ok': True,
+        'action': 'planning_start',
+        'timestamp': timestamp,
+        'message': (
+            'Planning-only Nav2 started.'
+            if result.get('started')
+            else 'Planning-only Nav2 is already running.'
+        ),
+        'stop_result': stop_result,
+        'planning': result,
+    }), status_code
+
+
+@app.route("/planning/stop", methods=["POST"])
+def planning_stop():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    try:
+        result = planning_control.stop(timestamp)
+    except PlanningControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_stop',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 503
+
+    localization_telemetry.clear()
+
+    return jsonify({
+        'ok': bool(stop_result.get('ok')),
+        'action': 'planning_stop',
+        'timestamp': timestamp,
+        'message': (
+            'Planning-only Nav2 stopped.'
+            if result.get('stopped')
+            else 'Planning-only Nav2 was already stopped.'
+        ),
+        'stop_result': stop_result,
+        'planning': result,
+    }), (
+        200
+        if stop_result.get('ok')
+        else 503
+    )
+
+
 @app.route("/localization/status", methods=["GET"])
 def localization_control_status():
     return jsonify({
@@ -1252,8 +1408,24 @@ def localization_start():
             'stop_result': stop_result,
         }), 503
 
-    localization_telemetry.clear()
     timestamp = now_iso()
+
+    if planning_control.snapshot().get('running'):
+        return jsonify({
+            'ok': False,
+            'action': 'localization_start',
+            'timestamp': timestamp,
+            'error': (
+                'Planning is running; standalone '
+                'localization was not started.'
+            ),
+            'stop_result': stop_result,
+            'localization': (
+                localization_control.snapshot()
+            ),
+        }), 409
+
+    localization_telemetry.clear()
 
     try:
         result = localization_control.start(
