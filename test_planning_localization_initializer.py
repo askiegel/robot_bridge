@@ -543,3 +543,266 @@ def test_source_has_no_motion_capability():
         'bt_navigator',
     ):
         assert marker not in route_source
+
+def test_pose_refresh_uses_only_fixed_nomotion_service(
+    monkeypatch,
+):
+    cleared = []
+    calls = []
+
+    initializer = PlanningLocalizationInitializer(
+        FakeNode(),
+        pose_clearer=lambda: cleared.append('clear'),
+    )
+
+    monkeypatch.setattr(
+        initializer,
+        '_wait_for_service',
+        lambda client, service_name: calls.append(
+            ('wait', client, service_name)
+        ),
+    )
+    monkeypatch.setattr(
+        initializer,
+        '_call_empty',
+        lambda client: calls.append(('call', client)),
+    )
+
+    result = initializer.refresh_pose()
+
+    assert cleared == ['clear']
+    assert calls == [
+        (
+            'wait',
+            initializer._nomotion_client,
+            initializer.NOMOTION_SERVICE,
+        ),
+        (
+            'call',
+            initializer._nomotion_client,
+        ),
+    ]
+    assert result['action'] == 'PLANNING_POSE_REFRESHED'
+    assert result['global_localization_requested'] is False
+    assert result['nomotion_updates_requested'] == 1
+
+
+def test_pose_refresh_preserves_read_only_safety_contract(
+    monkeypatch,
+):
+    initializer = PlanningLocalizationInitializer(
+        FakeNode()
+    )
+
+    monkeypatch.setattr(
+        initializer,
+        '_wait_for_service',
+        lambda client, service_name: None,
+    )
+    monkeypatch.setattr(
+        initializer,
+        '_call_empty',
+        lambda client: None,
+    )
+
+    result = initializer.refresh_pose()
+
+    assert result['stationary_required'] is True
+    assert result['pose_published'] is False
+    assert result['initial_pose_supplied'] is False
+    assert result['path_computed'] is False
+    assert result['path_executed'] is False
+    assert result['navigation_goal_executed'] is False
+    assert result['controller_enabled'] is False
+    assert result['navigator_enabled'] is False
+    assert result['motion_enabled'] is False
+
+
+def test_pose_refresh_rejects_concurrent_request():
+    initializer = PlanningLocalizationInitializer(
+        FakeNode()
+    )
+
+    assert initializer._request_lock.acquire(
+        blocking=False
+    )
+
+    try:
+        with pytest.raises(
+            PlanningLocalizationConflictError,
+            match='already active',
+        ):
+            initializer.refresh_pose()
+    finally:
+        initializer._request_lock.release()
+
+
+def test_pose_refresh_route_is_post_only():
+    response = bridge.app.test_client().get(
+        '/planning/refresh-localization'
+    )
+
+    assert response.status_code == 405
+
+
+def test_pose_refresh_route_requires_owned_planning(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        bridge,
+        'stop_robot',
+        lambda: {'ok': True},
+    )
+    monkeypatch.setattr(
+        bridge.planning_control,
+        'snapshot',
+        stopped_planning,
+    )
+
+    response = bridge.app.test_client().post(
+        '/planning/refresh-localization',
+        json={},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()['ok'] is False
+
+
+def test_pose_refresh_route_rejects_parameters(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        bridge,
+        'stop_robot',
+        lambda: {'ok': True},
+    )
+    monkeypatch.setattr(
+        bridge.planning_control,
+        'snapshot',
+        running_planning,
+    )
+    monkeypatch.setattr(bridge, 'ros_ready', True)
+    monkeypatch.setattr(
+        bridge,
+        'publisher_node',
+        SimpleNamespace(),
+    )
+
+    response = bridge.app.test_client().post(
+        '/planning/refresh-localization',
+        json={'service': '/anything'},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()['ok'] is False
+
+
+def test_pose_refresh_route_returns_fixed_result(
+    monkeypatch,
+):
+    result = {
+        'action': 'PLANNING_POSE_REFRESHED',
+        'global_localization_requested': False,
+        'nomotion_updates_requested': 1,
+        'stationary_required': True,
+        'pose_published': False,
+        'initial_pose_supplied': False,
+        'path_computed': False,
+        'path_executed': False,
+        'navigation_goal_executed': False,
+        'controller_enabled': False,
+        'navigator_enabled': False,
+        'motion_enabled': False,
+    }
+
+    fake_node = SimpleNamespace(
+        refresh_planning_localization_pose=(
+            lambda: dict(result)
+        )
+    )
+
+    monkeypatch.setattr(
+        bridge,
+        'stop_robot',
+        lambda: {'ok': True},
+    )
+    monkeypatch.setattr(
+        bridge.planning_control,
+        'snapshot',
+        running_planning,
+    )
+    monkeypatch.setattr(bridge, 'ros_ready', True)
+    monkeypatch.setattr(
+        bridge,
+        'publisher_node',
+        fake_node,
+    )
+
+    response = bridge.app.test_client().post(
+        '/planning/refresh-localization',
+        json={},
+    )
+
+    assert response.status_code == 200
+
+    payload = response.get_json()
+
+    assert payload['ok'] is True
+    assert payload['refresh'] == result
+
+
+def test_pose_refresh_source_has_no_execution_capability():
+    initializer_source = Path(
+        'planning_localization_initializer.py'
+    ).read_text(encoding='utf-8')
+    app_source = Path('app.py').read_text(
+        encoding='utf-8'
+    )
+
+    refresh_start = initializer_source.index(
+        '    def refresh_pose(self):'
+    )
+    refresh_end = initializer_source.index(
+        '    def initialize(self):',
+        refresh_start,
+    )
+    refresh_source = initializer_source[
+        refresh_start:refresh_end
+    ]
+
+    for marker in (
+        'reinitialize_global_localization',
+        'NavigateToPose',
+        'cmd_vel',
+        'Twist',
+        'create_publisher',
+        'ActionClient',
+        'controller_server',
+        'bt_navigator',
+        'goal_x',
+        'goal_y',
+        'initialpose',
+    ):
+        assert marker not in refresh_source
+
+    route_start = app_source.index(
+        '@app.route(\n'
+        '    "/planning/refresh-localization"'
+    )
+    route_end = app_source.index(
+        '@app.route(\n'
+        '    "/planning/compute-path"',
+        route_start,
+    )
+    route_source = app_source[route_start:route_end]
+
+    for marker in (
+        'NavigateToPose',
+        'cmd_vel',
+        'publish_motion',
+        'compute_path',
+        'goal_x',
+        'goal_y',
+        'initialpose',
+    ):
+        assert marker not in route_source

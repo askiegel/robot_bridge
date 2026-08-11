@@ -241,6 +241,12 @@ class RobotBridgePublisher(Node):
             .initialize()
         )
 
+    def refresh_planning_localization_pose(self):
+        return (
+            self.planning_localization_initializer
+            .refresh_pose()
+        )
+
     def compute_path(self, payload):
         return self.planning_path_service.compute(
             payload
@@ -1522,6 +1528,127 @@ def planning_initialize_localization():
         'stop_result': stop_result,
         'planning': planning,
         'initialization': result,
+    }), 200
+
+
+@app.route(
+    "/planning/refresh-localization",
+    methods=["POST"],
+)
+def planning_refresh_localization():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_refresh_localization',
+            'timestamp': timestamp,
+            'error': (
+                'Safety zero could not be published; '
+                'localization was not refreshed.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 503
+
+    planning = planning_control.snapshot()
+
+    if (
+        not planning.get('running')
+        or not planning.get('owned')
+    ):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_refresh_localization',
+            'timestamp': timestamp,
+            'error': (
+                'Owned planning runtime is not active.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 409
+
+    if not ros_ready or publisher_node is None:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_refresh_localization',
+            'timestamp': timestamp,
+            'error': (
+                ros_error
+                or 'ROS2 publisher is not ready.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 503
+
+    payload = request.get_json(silent=True)
+
+    if payload not in (None, {}):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_refresh_localization',
+            'timestamp': timestamp,
+            'error': (
+                'Planning localization refresh does not '
+                'accept request parameters.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 400
+
+    try:
+        result = (
+            publisher_node
+            .refresh_planning_localization_pose()
+        )
+    except PlanningLocalizationConflictError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_refresh_localization',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 409
+    except PlanningLocalizationUnavailableError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_refresh_localization',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 503
+    except PlanningLocalizationTimeoutError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_refresh_localization',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 504
+    except PlanningLocalizationError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'planning_refresh_localization',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'planning': planning,
+        }), 503
+
+    return jsonify({
+        'ok': True,
+        'action': 'planning_refresh_localization',
+        'timestamp': timestamp,
+        'message': (
+            'One stationary AMCL pose refresh was requested.'
+        ),
+        'refresh': result,
+        'stop_result': stop_result,
+        'planning': planning,
     }), 200
 
 

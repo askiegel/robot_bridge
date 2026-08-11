@@ -131,6 +131,48 @@ class PlanningLocalizationInitializer:
             cls.RESPONSE_TIMEOUT_SECONDS,
         )
 
+    def refresh_pose(self):
+        """
+        Request one fixed stationary AMCL pose refresh.
+
+        This method does not redistribute particles, publish an
+        initial pose, calculate or execute a path, start a controller,
+        publish velocity, or move the robot.
+        """
+        if not self._request_lock.acquire(blocking=False):
+            raise PlanningLocalizationConflictError(
+                'Planning localization request is already active.'
+            )
+
+        try:
+            self._wait_for_service(
+                self._nomotion_client,
+                self.NOMOTION_SERVICE,
+            )
+
+            # Remove the previous cached pose before requesting one
+            # fixed no-motion scan update. Any pose subsequently
+            # exposed to the dashboard must come from this refresh.
+            self._pose_clearer()
+            self._call_empty(self._nomotion_client)
+
+            return {
+                'action': 'PLANNING_POSE_REFRESHED',
+                'global_localization_requested': False,
+                'nomotion_updates_requested': 1,
+                'stationary_required': True,
+                'pose_published': False,
+                'initial_pose_supplied': False,
+                'path_computed': False,
+                'path_executed': False,
+                'navigation_goal_executed': False,
+                'controller_enabled': False,
+                'navigator_enabled': False,
+                'motion_enabled': False,
+            }
+        finally:
+            self._request_lock.release()
+
     def initialize(self):
         """
         Distribute particles and request bounded stationary updates.
