@@ -84,6 +84,7 @@ class FakeNode:
             nomotion_client or FakeClient()
         )
         self.service_names = []
+        self.destroyed_clients = []
 
     def create_client(self, service_type, name):
         self.service_names.append(name)
@@ -101,6 +102,10 @@ class FakeNode:
             return self.nomotion_client
 
         raise AssertionError(name)
+
+    def destroy_client(self, client):
+        self.destroyed_clients.append(client)
+        return True
 
 
 def running_planning():
@@ -129,13 +134,65 @@ def stopped_planning():
 
 def test_fixed_amcl_service_names():
     node = FakeNode()
+    initializer = PlanningLocalizationInitializer(
+        node
+    )
 
-    PlanningLocalizationInitializer(node)
+    initializer.initialize()
 
     assert node.service_names == [
         '/reinitialize_global_localization',
         '/request_nomotion_update',
     ]
+
+
+def test_initializer_recreates_fixed_clients_per_request():
+    node = FakeNode()
+    initializer = PlanningLocalizationInitializer(
+        node
+    )
+
+    initializer.initialize()
+
+    assert node.destroyed_clients == []
+
+    initializer.initialize()
+
+    assert node.service_names == [
+        '/reinitialize_global_localization',
+        '/request_nomotion_update',
+        '/reinitialize_global_localization',
+        '/request_nomotion_update',
+    ]
+    assert node.destroyed_clients == [
+        node.global_client,
+        node.nomotion_client,
+    ]
+    assert len(node.global_client.requests) == 2
+    assert (
+        len(node.nomotion_client.requests)
+        == initializer.NOMOTION_UPDATE_COUNT * 2
+    )
+
+
+def test_pose_refresh_recreates_only_nomotion_client():
+    node = FakeNode()
+    initializer = PlanningLocalizationInitializer(
+        node
+    )
+
+    initializer.refresh_pose()
+    initializer.refresh_pose()
+
+    assert node.service_names == [
+        '/request_nomotion_update',
+        '/request_nomotion_update',
+    ]
+    assert node.destroyed_clients == [
+        node.nomotion_client,
+    ]
+    assert node.global_client.requests == []
+    assert len(node.nomotion_client.requests) == 2
 
 
 def test_initializer_uses_only_empty_requests():

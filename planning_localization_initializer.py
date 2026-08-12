@@ -55,6 +55,7 @@ class PlanningLocalizationInitializer:
         self,
         node,
         client_factory=None,
+        client_destroyer=None,
         pose_clearer=None,
         sleeper=None,
     ):
@@ -62,21 +63,39 @@ class PlanningLocalizationInitializer:
         self._client_factory = (
             client_factory or node.create_client
         )
+        self._client_destroyer = (
+            client_destroyer or node.destroy_client
+        )
         self._pose_clearer = (
             pose_clearer or (lambda: None)
         )
         self._sleeper = sleeper or time.sleep
 
-        self._global_client = self._client_factory(
-            Empty,
-            self.GLOBAL_SERVICE,
-        )
-        self._nomotion_client = self._client_factory(
-            Empty,
-            self.NOMOTION_SERVICE,
-        )
+        self._global_client = None
+        self._nomotion_client = None
 
         self._request_lock = threading.Lock()
+
+    def _replace_client(
+        self,
+        attribute_name,
+        service_name,
+    ):
+        previous_client = getattr(
+            self,
+            attribute_name,
+        )
+
+        if previous_client is not None:
+            self._client_destroyer(previous_client)
+
+        client = self._client_factory(
+            Empty,
+            service_name,
+        )
+        setattr(self, attribute_name, client)
+
+        return client
 
     @staticmethod
     def _wait_future(future, timeout_seconds):
@@ -145,6 +164,11 @@ class PlanningLocalizationInitializer:
             )
 
         try:
+            self._replace_client(
+                '_nomotion_client',
+                self.NOMOTION_SERVICE,
+            )
+
             self._wait_for_service(
                 self._nomotion_client,
                 self.NOMOTION_SERVICE,
@@ -188,6 +212,15 @@ class PlanningLocalizationInitializer:
             )
 
         try:
+            self._replace_client(
+                '_global_client',
+                self.GLOBAL_SERVICE,
+            )
+            self._replace_client(
+                '_nomotion_client',
+                self.NOMOTION_SERVICE,
+            )
+
             self._wait_for_service(
                 self._global_client,
                 self.GLOBAL_SERVICE,
