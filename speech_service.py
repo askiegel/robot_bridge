@@ -23,7 +23,7 @@ class SpeechService:
     MAX_TEXT_LENGTH = 300
     ESPEAK_COMMAND = "/usr/bin/espeak"
     APLAY_COMMAND = "/usr/bin/aplay"
-    ALSA_DEVICE = "plughw:0,0"
+    ALSA_DEVICE = "plughw:1,0"
     AMPLITUDE = 70
     SPEED = 145
 

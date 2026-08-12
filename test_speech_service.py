@@ -116,3 +116,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_speech_service_uses_verified_headphone_output():
+    assert SpeechService.ALSA_DEVICE == "plughw:1,0"
