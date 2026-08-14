@@ -39,6 +39,15 @@ from mapping_control import (
     MappingControl,
     MappingControlError,
 )
+from navigation_goal_service import (
+    NavigationGoalCancelledError,
+    NavigationGoalConflictError,
+    NavigationGoalError,
+    NavigationGoalService,
+    NavigationGoalTimeoutError,
+    NavigationGoalUnavailableError,
+    NavigationGoalValidationError,
+)
 from navigation_control import (
     NavigationConflictError,
     NavigationControl,
@@ -176,6 +185,9 @@ class RobotBridgePublisher(Node):
         self.planning_path_service = (
             PlanningPathService(self)
         )
+        self.navigation_goal_service = (
+            NavigationGoalService(self)
+        )
         self.planning_localization_initializer = (
             PlanningLocalizationInitializer(
                 self,
@@ -258,6 +270,18 @@ class RobotBridgePublisher(Node):
     def compute_path(self, payload):
         return self.planning_path_service.compute(
             payload
+        )
+
+    def execute_navigation_goal(self, payload):
+        return self.navigation_goal_service.execute(
+            payload,
+            localization_telemetry.snapshot(),
+        )
+
+    def cancel_navigation_goal(self):
+        return (
+            self.navigation_goal_service
+            .cancel_active()
         )
 
     def publish_motion(self, linear_x, angular_z):
@@ -365,6 +389,25 @@ def clear_streaming_state():
         motion_state["angular_z"] = 0.0
         motion_state["deadline_monotonic"] = None
         motion_state["last_stop_at"] = now_iso()
+
+
+def cancel_navigation_goal():
+    if publisher_node is None:
+        return {
+            'active': False,
+            'cancel_requested': False,
+            'cancel_signal_sent': False,
+        }
+
+    try:
+        return publisher_node.cancel_navigation_goal()
+    except Exception as exc:
+        return {
+            'active': True,
+            'cancel_requested': True,
+            'cancel_signal_sent': False,
+            'error': str(exc),
+        }
 
 
 def stop_robot():
@@ -1419,8 +1462,164 @@ def navigation_start():
     }), status_code
 
 
+
+@app.route("/navigation/goal", methods=["POST"])
+def navigation_goal():
+    initial_stop_result = stop_robot()
+    timestamp = now_iso()
+    navigation = navigation_control.snapshot()
+
+    if not initial_stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': (
+                'Safety zero could not be published; '
+                'the navigation goal was not submitted.'
+            ),
+            'initial_stop_result': initial_stop_result,
+            'navigation': navigation,
+        }), 503
+
+    if (
+        not navigation.get('running')
+        or not navigation.get('owned')
+    ):
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': (
+                'Owned guarded navigation runtime '
+                'is not active.'
+            ),
+            'initial_stop_result': initial_stop_result,
+            'navigation': navigation,
+        }), 409
+
+    if not ros_ready or publisher_node is None:
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': (
+                ros_error
+                or 'ROS2 navigation client is not ready.'
+            ),
+            'initial_stop_result': initial_stop_result,
+            'navigation': navigation,
+        }), 503
+
+    payload = request.get_json(silent=True)
+
+    try:
+        result = (
+            publisher_node
+            .execute_navigation_goal(payload)
+        )
+    except NavigationGoalValidationError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 400
+    except NavigationGoalConflictError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 409
+    except NavigationGoalCancelledError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 409
+    except NavigationGoalTimeoutError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 504
+    except NavigationGoalUnavailableError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 503
+    except NavigationGoalError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 503
+
+    final_stop_result = stop_robot()
+
+    if not final_stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': (
+                'Navigation completed but the final '
+                'safety zero could not be published.'
+            ),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'navigation': navigation_control.snapshot(),
+            'result': result,
+        }), 503
+
+    return jsonify({
+        'ok': True,
+        'action': 'navigation_goal',
+        'timestamp': timestamp,
+        'message': (
+            'One bounded guarded navigation goal '
+            'completed.'
+        ),
+        'initial_stop_result': initial_stop_result,
+        'final_stop_result': final_stop_result,
+        'navigation': navigation_control.snapshot(),
+        'result': result,
+    }), 200
+
+
 @app.route("/navigation/stop", methods=["POST"])
 def navigation_stop():
+    cancel_result = cancel_navigation_goal()
     stop_result = stop_robot()
     timestamp = now_iso()
 
@@ -1450,6 +1649,7 @@ def navigation_stop():
                 'already stopped.'
             )
         ),
+        'cancel_result': cancel_result,
         'stop_result': stop_result,
         'navigation': result,
     }), (
@@ -2136,6 +2336,7 @@ def localization_stop():
 
 @app.route("/stop", methods=["POST"])
 def stop():
+    cancel_result = cancel_navigation_goal()
     stop_result = stop_robot()
 
     status_code = (
@@ -2157,6 +2358,7 @@ def stop():
                 if stop_result.get("ok")
                 else "ROS2 stop publish failed."
             ),
+            "cancel_result": cancel_result,
             "stop_result": stop_result,
         }
     ), status_code

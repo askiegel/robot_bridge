@@ -136,8 +136,8 @@ def test_snapshot_exposes_runtime_without_goal_execution(
     assert snapshot["navigation_enabled"] is True
     assert snapshot["control_enabled"] is True
     assert snapshot["motion_enabled"] is True
-    assert snapshot["execution_enabled"] is False
-    assert snapshot["goal_submission_enabled"] is False
+    assert snapshot["execution_enabled"] is True
+    assert snapshot["goal_submission_enabled"] is True
     assert snapshot["controller_enabled"] is True
     assert snapshot["navigator_enabled"] is True
     assert snapshot["maximum_goal_distance_meters"] == 0.25
@@ -264,7 +264,7 @@ def test_process_detection_includes_all_nav2_modes():
     )
 
 
-def test_application_has_lifecycle_routes_but_no_goal_route():
+def test_application_has_guarded_navigation_routes():
     source = Path("app.py").read_text(
         encoding="utf-8"
     )
@@ -272,16 +272,14 @@ def test_application_has_lifecycle_routes_but_no_goal_route():
     for route in (
         '@app.route("/navigation/status", methods=["GET"])',
         '@app.route("/navigation/start", methods=["POST"])',
+        '@app.route("/navigation/goal", methods=["POST"])',
         '@app.route("/navigation/stop", methods=["POST"])',
     ):
         assert route in source
 
     for forbidden in (
-        '"/navigation/goal"',
         '"/navigation/navigate"',
         '"/navigation/execute"',
-        "NavigateToPose",
-        "send_goal",
         "send_goal_async",
     ):
         assert forbidden not in source

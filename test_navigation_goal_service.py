@@ -411,11 +411,25 @@ def test_source_contains_no_retry_or_recovery_loop():
     assert "MAXIMUM_EXECUTION_SECONDS = 15.0" in source
 
 
-def test_executor_is_not_connected_to_application():
+def test_executor_is_connected_only_to_guarded_route():
     source = Path("app.py").read_text(
         encoding="utf-8"
     )
 
-    assert "NavigationGoalService" not in source
-    assert "/navigation/goal" not in source
-    assert "navigate_to_pose" not in source
+    assert "NavigationGoalService" in source
+    assert (
+        '@app.route("/navigation/goal", '
+        'methods=["POST"])'
+        in source
+    )
+    assert "execute_navigation_goal" in source
+    assert "localization_telemetry.snapshot()" in source
+
+    for forbidden in (
+        '@app.route("/navigation/navigate"',
+        '@app.route("/navigation/execute"',
+        "goal_distance",
+        "execution_timeout",
+        "behavior_tree = request",
+    ):
+        assert forbidden not in source
