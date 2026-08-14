@@ -1471,6 +1471,215 @@ def navigation_start():
 
 
 
+@app.route(
+    "/navigation/initialize-localization",
+    methods=["POST"],
+)
+def navigation_initialize_localization():
+    initial_stop_result = stop_robot()
+    timestamp = now_iso()
+    navigation = navigation_control.snapshot()
+
+    if not initial_stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                'Safety zero could not be published; '
+                'localization was not initialized.'
+            ),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'navigation': navigation,
+        }), 503
+
+    if (
+        not navigation.get('running')
+        or not navigation.get('owned')
+    ):
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                'Owned guarded navigation runtime '
+                'is not active.'
+            ),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'navigation': navigation,
+        }), 409
+
+    if not ros_ready or publisher_node is None:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                ros_error
+                or 'ROS2 publisher is not ready.'
+            ),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'final_stop_result': final_stop_result,
+            'navigation': navigation,
+        }), 503
+
+    payload = request.get_json(silent=True)
+
+    if payload not in (None, {}):
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                'Navigation localization '
+                'initialization does not accept '
+                'request parameters.'
+            ),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'final_stop_result': final_stop_result,
+            'navigation': navigation,
+        }), 400
+
+    localization_telemetry.clear()
+
+    try:
+        result = (
+            publisher_node
+            .initialize_planning_localization()
+        )
+    except PlanningLocalizationConflictError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'final_stop_result': final_stop_result,
+            'navigation': (
+                navigation_control.snapshot()
+            ),
+        }), 409
+    except PlanningLocalizationUnavailableError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'final_stop_result': final_stop_result,
+            'navigation': (
+                navigation_control.snapshot()
+            ),
+        }), 503
+    except PlanningLocalizationTimeoutError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'final_stop_result': final_stop_result,
+            'navigation': (
+                navigation_control.snapshot()
+            ),
+        }), 504
+    except PlanningLocalizationError as exc:
+        final_stop_result = stop_robot()
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': str(exc),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'final_stop_result': final_stop_result,
+            'navigation': (
+                navigation_control.snapshot()
+            ),
+        }), 422
+
+    final_stop_result = stop_robot()
+
+    if not final_stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': (
+                'navigation_initialize_localization'
+            ),
+            'timestamp': timestamp,
+            'error': (
+                'Localization initialization '
+                'completed but the final safety '
+                'zero could not be published.'
+            ),
+            'initial_stop_result': (
+                initial_stop_result
+            ),
+            'final_stop_result': final_stop_result,
+            'navigation': (
+                navigation_control.snapshot()
+            ),
+            'initialization': result,
+        }), 503
+
+    return jsonify({
+        'ok': True,
+        'action': (
+            'navigation_initialize_localization'
+        ),
+        'timestamp': timestamp,
+        'message': (
+            'AMCL global localization and '
+            'stationary scan updates were '
+            'requested for guarded navigation.'
+        ),
+        'initial_stop_result': (
+            initial_stop_result
+        ),
+        'final_stop_result': final_stop_result,
+        'navigation': (
+            navigation_control.snapshot()
+        ),
+        'initialization': result,
+    }), 200
+
+
 @app.route("/navigation/goal", methods=["POST"])
 def navigation_goal():
     initial_stop_result = stop_robot()
