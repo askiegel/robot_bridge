@@ -39,6 +39,11 @@ from mapping_control import (
     MappingControl,
     MappingControlError,
 )
+from navigation_control import (
+    NavigationConflictError,
+    NavigationControl,
+    NavigationControlError,
+)
 from planning_control import (
     PlanningConflictError,
     PlanningControl,
@@ -112,6 +117,7 @@ localization_telemetry = LocalizationTelemetry()
 localization_control = LocalizationControl()
 mapping_control = MappingControl()
 planning_control = PlanningControl()
+navigation_control = NavigationControl()
 mapping_requirements = mapping_control.snapshot()
 mapping_readiness_telemetry = (
     MappingReadinessTelemetry(
@@ -143,12 +149,14 @@ map_promotion = MapPromotion(
         'mapping': mapping_control.snapshot(),
         'localization': localization_control.snapshot(),
         'planning': planning_control.snapshot(),
+        'navigation': navigation_control.snapshot(),
     },
 )
 
 atexit.register(localization_control.shutdown)
 atexit.register(mapping_control.shutdown)
 atexit.register(planning_control.shutdown)
+atexit.register(navigation_control.shutdown)
 
 
 def now_iso():
@@ -1148,6 +1156,19 @@ def mapping_start():
             'mapping': mapping_control.snapshot(),
         }), 409
 
+    if navigation_control.snapshot().get('running'):
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_start',
+            'timestamp': timestamp,
+            'error': (
+                'Navigation is running; mapping was '
+                'not started.'
+            ),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+        }), 409
+
     if not mapping_control.snapshot().get('running'):
         live_mapping_telemetry.clear()
         mapping_readiness_telemetry.clear()
@@ -1291,6 +1312,153 @@ def mapping_stop():
     )
 
 
+@app.route("/navigation/status", methods=["GET"])
+def navigation_control_status():
+    return jsonify({
+        'ok': True,
+        'service': 'mini_pupper_robot_bridge',
+        'timestamp': now_iso(),
+        'navigation': navigation_control.snapshot(),
+    })
+
+
+@app.route("/navigation/start", methods=["POST"])
+def navigation_start():
+    stop_result = stop_robot()
+
+    if not stop_result.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_start',
+            'timestamp': now_iso(),
+            'error': (
+                'Safety zero could not be published; '
+                'navigation was not started.'
+            ),
+            'stop_result': stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 503
+
+    timestamp = now_iso()
+
+    conflicts = (
+        (
+            'Mapping',
+            mapping_control.snapshot(),
+        ),
+        (
+            'Planning',
+            planning_control.snapshot(),
+        ),
+        (
+            'Standalone localization',
+            localization_control.snapshot(),
+        ),
+    )
+
+    for name, state in conflicts:
+        if state.get('running'):
+            return jsonify({
+                'ok': False,
+                'action': 'navigation_start',
+                'timestamp': timestamp,
+                'error': (
+                    f'{name} is running; navigation '
+                    'was not started.'
+                ),
+                'stop_result': stop_result,
+                'navigation': (
+                    navigation_control.snapshot()
+                ),
+            }), 409
+
+    localization_telemetry.clear()
+
+    try:
+        result = navigation_control.start(timestamp)
+    except NavigationConflictError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_start',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 409
+    except NavigationControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_start',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 503
+
+    status_code = (
+        201
+        if result.get('started')
+        else 200
+    )
+
+    return jsonify({
+        'ok': True,
+        'action': 'navigation_start',
+        'timestamp': timestamp,
+        'message': (
+            'Guarded navigation runtime started '
+            'without submitting a goal.'
+            if result.get('started')
+            else (
+                'Guarded navigation runtime is '
+                'already running.'
+            )
+        ),
+        'stop_result': stop_result,
+        'navigation': result,
+    }), status_code
+
+
+@app.route("/navigation/stop", methods=["POST"])
+def navigation_stop():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    try:
+        result = navigation_control.stop(timestamp)
+    except NavigationControlError as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_stop',
+            'timestamp': timestamp,
+            'error': str(exc),
+            'stop_result': stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 503
+
+    localization_telemetry.clear()
+
+    return jsonify({
+        'ok': bool(stop_result.get('ok')),
+        'action': 'navigation_stop',
+        'timestamp': timestamp,
+        'message': (
+            'Guarded navigation runtime stopped.'
+            if result.get('stopped')
+            else (
+                'Guarded navigation runtime was '
+                'already stopped.'
+            )
+        ),
+        'stop_result': stop_result,
+        'navigation': result,
+    }), (
+        200
+        if stop_result.get('ok')
+        else 503
+    )
+
+
 @app.route("/planning/status", methods=["GET"])
 def planning_control_status():
     return jsonify({
@@ -1341,6 +1509,19 @@ def planning_start():
             'error': (
                 'Standalone localization is running; '
                 'planning was not started.'
+            ),
+            'stop_result': stop_result,
+            'planning': planning_control.snapshot(),
+        }), 409
+
+    if navigation_control.snapshot().get('running'):
+        return jsonify({
+            'ok': False,
+            'action': 'planning_start',
+            'timestamp': timestamp,
+            'error': (
+                'Navigation is running; planning was '
+                'not started.'
             ),
             'stop_result': stop_result,
             'planning': planning_control.snapshot(),
@@ -1842,6 +2023,21 @@ def localization_start():
             'timestamp': timestamp,
             'error': (
                 'Planning is running; standalone '
+                'localization was not started.'
+            ),
+            'stop_result': stop_result,
+            'localization': (
+                localization_control.snapshot()
+            ),
+        }), 409
+
+    if navigation_control.snapshot().get('running'):
+        return jsonify({
+            'ok': False,
+            'action': 'localization_start',
+            'timestamp': timestamp,
+            'error': (
+                'Navigation is running; standalone '
                 'localization was not started.'
             ),
             'stop_result': stop_result,
