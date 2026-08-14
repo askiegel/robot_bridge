@@ -755,9 +755,17 @@ def map_status():
 
 
 def localization_runtime_active():
-    """Return whether the conservative AMCL node is currently present."""
+    """Return whether an owned or discovered AMCL runtime is active."""
     if not ros_ready or publisher_node is None:
         return False
+
+    navigation = navigation_control.snapshot()
+
+    if (
+        navigation.get('running')
+        and navigation.get('owned')
+    ):
+        return True
 
     try:
         with publisher_lock:

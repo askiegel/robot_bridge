@@ -286,3 +286,110 @@ def test_localization_endpoint_rejects_post(monkeypatch):
     response = client.post('/telemetry/localization')
 
     assert response.status_code == 405
+
+
+class FakeLocalizationNavigationControl:
+    def __init__(self, *, running, owned):
+        self._running = running
+        self._owned = owned
+
+    def snapshot(self):
+        return {
+            'running': self._running,
+            'owned': self._owned,
+        }
+
+
+def test_owned_navigation_marks_localization_active(
+    monkeypatch,
+):
+    monkeypatch.setattr(bridge, 'ros_ready', True)
+    monkeypatch.setattr(
+        bridge,
+        'publisher_node',
+        SimpleNamespace(
+            get_node_names=lambda: [],
+        ),
+    )
+    monkeypatch.setattr(
+        bridge,
+        'navigation_control',
+        FakeLocalizationNavigationControl(
+            running=True,
+            owned=True,
+        ),
+    )
+
+    assert bridge.localization_runtime_active() is True
+
+
+def test_unowned_navigation_does_not_mark_active(
+    monkeypatch,
+):
+    monkeypatch.setattr(bridge, 'ros_ready', True)
+    monkeypatch.setattr(
+        bridge,
+        'publisher_node',
+        SimpleNamespace(
+            get_node_names=lambda: [],
+        ),
+    )
+    monkeypatch.setattr(
+        bridge,
+        'navigation_control',
+        FakeLocalizationNavigationControl(
+            running=True,
+            owned=False,
+        ),
+    )
+
+    assert bridge.localization_runtime_active() is False
+
+
+def test_discovered_amcl_still_marks_active(
+    monkeypatch,
+):
+    monkeypatch.setattr(bridge, 'ros_ready', True)
+    monkeypatch.setattr(
+        bridge,
+        'publisher_node',
+        SimpleNamespace(
+            get_node_names=lambda: [
+                '/robot_bridge_publisher',
+                '/amcl',
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        bridge,
+        'navigation_control',
+        FakeLocalizationNavigationControl(
+            running=False,
+            owned=False,
+        ),
+    )
+
+    assert bridge.localization_runtime_active() is True
+
+
+def test_ros_unavailable_overrides_navigation_state(
+    monkeypatch,
+):
+    monkeypatch.setattr(bridge, 'ros_ready', False)
+    monkeypatch.setattr(
+        bridge,
+        'publisher_node',
+        SimpleNamespace(
+            get_node_names=lambda: [],
+        ),
+    )
+    monkeypatch.setattr(
+        bridge,
+        'navigation_control',
+        FakeLocalizationNavigationControl(
+            running=True,
+            owned=True,
+        ),
+    )
+
+    assert bridge.localization_runtime_active() is False
