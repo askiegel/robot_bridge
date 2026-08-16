@@ -306,6 +306,56 @@ def test_navigation_start_requires_safety_zero_and_exclusivity():
     assert "localization_telemetry.clear()" in control
 
 
+def test_navigation_start_requires_exact_scan_time_tf_preflight():
+    source = Path("app.py").read_text(
+        encoding="utf-8"
+    )
+
+    control = source[
+        source.index(
+            '@app.route("/navigation/start"'
+        ):
+        source.index(
+            '@app.route("/navigation/stop"'
+        )
+    ]
+
+    node = source[
+        source.index("class RobotBridgePublisher"):
+        source.index("def ros_spin():")
+    ]
+
+    assert "'/odom/local'" in node
+    assert "self.update_local_odom" in node
+    assert "self.update_lidar" in node
+    assert "message.header.stamp" in node
+    assert "message.header.frame_id" in node
+    assert "Time.from_msg(scan_stamp)" in node
+    assert "lookup_transform(" in node
+    assert "'odom'," in node
+    assert (
+        "publisher_node.navigation_start_preflight()"
+        in control
+    )
+    assert (
+        control.index(
+            "publisher_node.navigation_start_preflight()"
+        )
+        < control.index(
+            "navigation_control.start(timestamp)"
+        )
+    )
+    assert "'preflight': preflight" in control
+    assert (
+        "NAVIGATION_PREFLIGHT_MAX_SENSOR_AGE_SECONDS"
+        in source
+    )
+    assert (
+        "NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS"
+        in source
+    )
+
+
 def test_other_modes_block_navigation_overlap():
     source = Path("app.py").read_text(
         encoding="utf-8"

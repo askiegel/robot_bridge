@@ -11,6 +11,8 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import Twist
 from cartographer_ros_msgs.msg import SubmapList
 from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import Odometry
+from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy
@@ -18,7 +20,11 @@ from rclpy.qos import HistoryPolicy
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
+from tf2_ros import Buffer
+from tf2_ros import TransformException
+from tf2_ros import TransformListener
 
 from candidate_map_telemetry import (
     CandidateMapTelemetry,
@@ -103,6 +109,9 @@ STREAM_DEFAULT_TIMEOUT_SECONDS = 0.75
 STREAM_MIN_TIMEOUT_SECONDS = 0.20
 STREAM_MAX_TIMEOUT_SECONDS = 2.00
 
+NAVIGATION_PREFLIGHT_MAX_SENSOR_AGE_SECONDS = 1.00
+NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS = 0.25
+
 ros_ready = False
 ros_error = None
 publisher_node = None
@@ -182,6 +191,19 @@ class RobotBridgePublisher(Node):
             10,
         )
 
+        self.navigation_preflight_lock = threading.Lock()
+        self.latest_scan_stamp = None
+        self.latest_scan_frame = None
+        self.latest_scan_received_at = None
+        self.latest_local_odom_received_at = None
+
+        self.navigation_tf_buffer = Buffer()
+        self.navigation_tf_listener = TransformListener(
+            self.navigation_tf_buffer,
+            self,
+            spin_thread=False,
+        )
+
         self.planning_path_service = (
             PlanningPathService(self)
         )
@@ -200,8 +222,15 @@ class RobotBridgePublisher(Node):
         self.lidar_subscription = self.create_subscription(
             LaserScan,
             '/scan',
-            lidar_telemetry.update,
+            self.update_lidar,
             qos_profile_sensor_data,
+        )
+
+        self.local_odom_subscription = self.create_subscription(
+            Odometry,
+            '/odom/local',
+            self.update_local_odom,
+            10,
         )
 
         self.get_logger().info(
@@ -254,6 +283,103 @@ class RobotBridgePublisher(Node):
             "Robot Bridge mapping readiness ready on "
             "/submap_list"
         )
+
+    def update_lidar(self, message):
+        lidar_telemetry.update(message)
+
+        with self.navigation_preflight_lock:
+            self.latest_scan_stamp = message.header.stamp
+            self.latest_scan_frame = (
+                message.header.frame_id.lstrip('/')
+            )
+            self.latest_scan_received_at = time.monotonic()
+
+    def update_local_odom(self, _message):
+        with self.navigation_preflight_lock:
+            self.latest_local_odom_received_at = (
+                time.monotonic()
+            )
+
+    def navigation_start_preflight(self):
+        checked_at = time.monotonic()
+
+        with self.navigation_preflight_lock:
+            scan_stamp = self.latest_scan_stamp
+            scan_frame = self.latest_scan_frame
+            scan_received_at = self.latest_scan_received_at
+            odom_received_at = (
+                self.latest_local_odom_received_at
+            )
+
+        failures = []
+
+        if odom_received_at is None:
+            failures.append(
+                'No /odom/local message has been received.'
+            )
+            odom_age = None
+        else:
+            odom_age = checked_at - odom_received_at
+
+            if (
+                odom_age
+                > NAVIGATION_PREFLIGHT_MAX_SENSOR_AGE_SECONDS
+            ):
+                failures.append(
+                    '/odom/local is stale '
+                    f'({odom_age:.3f} seconds old).'
+                )
+
+        if (
+            scan_stamp is None
+            or scan_received_at is None
+            or not scan_frame
+        ):
+            failures.append(
+                'No usable /scan message has been received.'
+            )
+            scan_age = None
+        else:
+            scan_age = checked_at - scan_received_at
+
+            if (
+                scan_age
+                > NAVIGATION_PREFLIGHT_MAX_SENSOR_AGE_SECONDS
+            ):
+                failures.append(
+                    '/scan is stale '
+                    f'({scan_age:.3f} seconds old).'
+                )
+
+        if not failures:
+            try:
+                self.navigation_tf_buffer.lookup_transform(
+                    'odom',
+                    scan_frame,
+                    Time.from_msg(scan_stamp),
+                    timeout=Duration(
+                        seconds=(
+                            NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS
+                        ),
+                    ),
+                )
+            except TransformException as exc:
+                failures.append(
+                    'Exact scan-time transform '
+                    f'odom -> {scan_frame} is unavailable: '
+                    f'{exc}'
+                )
+
+        return {
+            'ok': not failures,
+            'odom_topic': '/odom/local',
+            'scan_topic': '/scan',
+            'target_frame': 'odom',
+            'scan_frame': scan_frame,
+            'odom_age_seconds': odom_age,
+            'scan_age_seconds': scan_age,
+            'failures': failures,
+        }
 
     def initialize_planning_localization(self):
         return (
@@ -1422,6 +1548,51 @@ def navigation_start():
                     navigation_control.snapshot()
                 ),
             }), 409
+
+    if not ros_ready or publisher_node is None:
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_start',
+            'timestamp': timestamp,
+            'error': (
+                ros_error
+                or 'ROS2 is not ready; navigation '
+                'was not started.'
+            ),
+            'stop_result': stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 503
+
+    try:
+        preflight = (
+            publisher_node.navigation_start_preflight()
+        )
+    except Exception as exc:
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_start',
+            'timestamp': timestamp,
+            'error': (
+                'Navigation startup preflight failed: '
+                f'{exc}'
+            ),
+            'stop_result': stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 503
+
+    if not preflight.get('ok'):
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_start',
+            'timestamp': timestamp,
+            'error': (
+                'Navigation startup preflight rejected '
+                'the request.'
+            ),
+            'preflight': preflight,
+            'stop_result': stop_result,
+            'navigation': navigation_control.snapshot(),
+        }), 503
 
     localization_telemetry.clear()
 
