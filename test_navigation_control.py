@@ -354,6 +354,11 @@ def test_navigation_start_requires_exact_scan_time_tf_preflight():
         "NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS"
         in source
     )
+    assert (
+        "NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS = 1.00"
+        in source
+    )
+    assert "Time.from_msg(scan_stamp)" in node
 
 
 def test_other_modes_block_navigation_overlap():
