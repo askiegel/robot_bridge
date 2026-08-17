@@ -13,7 +13,7 @@ from cartographer_ros_msgs.msg import SubmapList
 from nav_msgs.msg import OccupancyGrid
 from nav_msgs.msg import Odometry
 from rclpy.duration import Duration
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy
 from rclpy.qos import HistoryPolicy
@@ -436,7 +436,9 @@ def ros_spin():
         rclpy.init(args=None)
 
         node = RobotBridgePublisher()
-        executor = SingleThreadedExecutor()
+        executor = MultiThreadedExecutor(
+            num_threads=2,
+        )
         executor.add_node(node)
 
         publisher_node = node

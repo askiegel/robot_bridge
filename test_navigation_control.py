@@ -409,3 +409,20 @@ def test_global_shutdown_registers_navigation_cleanup():
         "atexit.register(navigation_control.shutdown)"
         in source
     )
+
+
+def test_robot_bridge_processes_tf_without_telemetry_backlog():
+    source = Path("app.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "from rclpy.executors import MultiThreadedExecutor"
+        in source
+    )
+    assert "SingleThreadedExecutor" not in source
+    assert "executor = MultiThreadedExecutor(" in source
+    assert "num_threads=2" in source
+    assert "spin_thread=False" in source
+    assert "Time.from_msg(scan_stamp)" in source
+    assert "lookup_transform(" in source
