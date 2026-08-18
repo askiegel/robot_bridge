@@ -211,16 +211,16 @@ def test_invalid_localization_is_rejected(snapshot, error):
         NavigationGoalService.validate_pose(snapshot)
 
 
-def test_goal_beyond_quarter_meter_is_rejected():
+def test_goal_beyond_half_meter_is_rejected():
     service, _ = make_service()
 
     with pytest.raises(
         NavigationGoalValidationError,
-        match="0.25-meter limit",
+        match="0.50-meter limit",
     ):
         service.execute(
             {
-                "goal_x": 1.251,
+                "goal_x": 1.501,
                 "goal_y": 2.0,
                 "goal_yaw": 0.0,
             },
@@ -247,7 +247,7 @@ def test_fixed_guarded_goal_succeeds():
     assert result["recoveries_requested"] == 0
     assert result[
         "maximum_goal_distance_meters"
-    ] == 0.25
+    ] == 0.50
     assert result[
         "maximum_execution_seconds"
     ] == 15.0
@@ -407,7 +407,7 @@ def test_source_contains_no_retry_or_recovery_loop():
     assert "BackUp" not in source
     assert "Spin" not in source
     assert "RecoveryNode" not in source
-    assert "MAXIMUM_GOAL_DISTANCE_METERS = 0.25" in source
+    assert "MAXIMUM_GOAL_DISTANCE_METERS = 0.50" in source
     assert "MAXIMUM_EXECUTION_SECONDS = 15.0" in source
 
 

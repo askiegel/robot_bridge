@@ -41,7 +41,7 @@ class NavigationGoalService:
 
     ACTION_NAME = '/navigate_to_pose'
     FRAME_ID = 'map'
-    MAXIMUM_GOAL_DISTANCE_METERS = 0.25
+    MAXIMUM_GOAL_DISTANCE_METERS = 0.50
     MAXIMUM_EXECUTION_SECONDS = 15.0
     MAXIMUM_POSE_AGE_SECONDS = 3.0
     SERVER_TIMEOUT_SECONDS = 4.0
@@ -205,7 +205,7 @@ class NavigationGoalService:
 
         if distance > cls.MAXIMUM_GOAL_DISTANCE_METERS:
             raise NavigationGoalValidationError(
-                'Goal exceeds the fixed 0.25-meter limit.'
+                'Goal exceeds the fixed 0.50-meter limit.'
             )
 
         return float(distance)

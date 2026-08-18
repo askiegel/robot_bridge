@@ -144,7 +144,7 @@ class NavigationControl:
                 'goal_submission_enabled': True,
                 'controller_enabled': True,
                 'navigator_enabled': True,
-                'maximum_goal_distance_meters': 0.25,
+                'maximum_goal_distance_meters': 0.50,
                 'maximum_execution_seconds': 15.0,
             }
 

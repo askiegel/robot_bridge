@@ -22,7 +22,7 @@ class FakeNavigationControl:
             "owned": self.owned,
             "execution_enabled": True,
             "goal_submission_enabled": True,
-            "maximum_goal_distance_meters": 0.25,
+            "maximum_goal_distance_meters": 0.50,
             "maximum_execution_seconds": 15.0,
         }
 
