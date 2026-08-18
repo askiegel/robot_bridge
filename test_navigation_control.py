@@ -426,3 +426,44 @@ def test_robot_bridge_processes_tf_without_telemetry_backlog():
     assert "spin_thread=False" in source
     assert "Time.from_msg(scan_stamp)" in source
     assert "lookup_transform(" in source
+
+def test_navigation_goal_refreshes_pose_atomically():
+    source = open(
+        "app.py",
+        encoding="utf-8",
+    ).read()
+
+    start = source.index(
+        "    def execute_navigation_goal(self, payload):"
+    )
+    end = source.index(
+        "    def cancel_navigation_goal(self):",
+        start,
+    )
+    method = source[start:end]
+
+    refresh = method.index(
+        "self.refresh_planning_localization_pose()"
+    )
+    snapshot = method.index(
+        "localization_telemetry.snapshot()"
+    )
+    execution = method.index(
+        "self.navigation_goal_service.execute("
+    )
+
+    assert refresh < snapshot < execution
+    assert "for attempt in range(60):" in method
+    assert "time.sleep(0.05)" in method
+    assert (
+        "pose_snapshot.get('available') is True"
+        in method
+    )
+    assert (
+        "except PlanningLocalizationError as exc:"
+        in method
+    )
+    assert "reinitialize_global_localization" not in method
+    assert "NavigateToPose" not in method
+    assert "cmd_vel" not in method
+

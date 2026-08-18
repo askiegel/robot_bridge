@@ -399,9 +399,28 @@ class RobotBridgePublisher(Node):
         )
 
     def execute_navigation_goal(self, payload):
+        try:
+            self.refresh_planning_localization_pose()
+        except PlanningLocalizationError as exc:
+            raise NavigationGoalUnavailableError(
+                'Stationary localization pose refresh '
+                f'failed: {exc}'
+            ) from exc
+
+        pose_snapshot = None
+
+        for attempt in range(60):
+            pose_snapshot = localization_telemetry.snapshot()
+
+            if pose_snapshot.get('available') is True:
+                break
+
+            if attempt < 59:
+                time.sleep(0.05)
+
         return self.navigation_goal_service.execute(
             payload,
-            localization_telemetry.snapshot(),
+            pose_snapshot,
         )
 
     def cancel_navigation_goal(self):
