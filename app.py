@@ -198,10 +198,19 @@ class RobotBridgePublisher(Node):
         self.latest_local_odom_received_at = None
 
         self.navigation_tf_buffer = Buffer()
+
+        navigation_tf_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
         self.navigation_tf_listener = TransformListener(
             self.navigation_tf_buffer,
             self,
             spin_thread=False,
+            qos=navigation_tf_qos,
         )
 
         self.planning_path_service = (

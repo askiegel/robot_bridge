@@ -423,7 +423,30 @@ def test_robot_bridge_processes_tf_without_telemetry_backlog():
     assert "SingleThreadedExecutor" not in source
     assert "executor = MultiThreadedExecutor(" in source
     assert "num_threads=2" in source
-    assert "spin_thread=False" in source
+
+    tf_start = source.index(
+        "        self.navigation_tf_buffer = Buffer()"
+    )
+    tf_end = source.index(
+        "        self.planning_path_service =",
+        tf_start,
+    )
+    tf_listener = source[tf_start:tf_end]
+
+    assert "navigation_tf_qos = QoSProfile(" in tf_listener
+    assert "history=HistoryPolicy.KEEP_LAST" in tf_listener
+    assert "depth=1" in tf_listener
+    assert (
+        "reliability=ReliabilityPolicy.BEST_EFFORT"
+        in tf_listener
+    )
+    assert (
+        "durability=DurabilityPolicy.VOLATILE"
+        in tf_listener
+    )
+    assert "spin_thread=False" in tf_listener
+    assert "qos=navigation_tf_qos" in tf_listener
+
     assert "Time.from_msg(scan_stamp)" in source
     assert "lookup_transform(" in source
 
