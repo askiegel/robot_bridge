@@ -29,6 +29,10 @@ class MappingControl:
     ROS2_EXECUTABLE = Path('/opt/ros/humble/bin/ros2')
     PACKAGE = 'mini_pupper_slam'
     LAUNCH_FILE = 'slam.launch.py'
+    SERVICE = 'mayday-slam.service'
+    SERVICE_CGROUP = '/system.slice/mayday-slam.service'
+    SYSTEMCTL_EXECUTABLE = Path('/usr/bin/systemctl')
+    SUDO_EXECUTABLE = Path('/usr/bin/sudo')
 
     def __init__(
         self,
@@ -37,6 +41,7 @@ class MappingControl:
         candidate_root=None,
         converter_path=None,
         command_runner=None,
+        service_runner=None,
         process_factory=None,
         process_finder=None,
         identity_checker=None,
@@ -74,6 +79,9 @@ class MappingControl:
         )
         self._command_runner = (
             command_runner or subprocess.run
+        )
+        self._service_runner = (
+            service_runner or subprocess.run
         )
 
         self._process_factory = (
@@ -113,37 +121,194 @@ class MappingControl:
             'use_rviz:=false',
         ]
 
-    def _refresh_locked(self):
-        if (
-            self._process is not None
-            and self._process.poll() is not None
-        ):
-            self._process = None
-            self._started_at = None
+    def _query_service(self):
+        """Return authoritative systemd state for mapping."""
+        command = [
+            str(self.SYSTEMCTL_EXECUTABLE),
+            'show',
+            self.SERVICE,
+            '-p',
+            'ActiveState',
+            '-p',
+            'SubState',
+            '-p',
+            'MainPID',
+            '-p',
+            'ControlGroup',
+            '--no-pager',
+        ]
+
+        try:
+            completed = self._service_runner(
+                command,
+                cwd=str(Path.home()),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=10.0,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MappingControlError(
+                'Mapping systemd status query timed out.'
+            ) from exc
+        except OSError as exc:
+            raise MappingControlError(
+                f'Mapping systemd status query failed: {exc}'
+            ) from exc
+
+        output = str(
+            getattr(completed, 'stdout', '')
+        ).strip()
+
+        if completed.returncode != 0:
+            raise MappingControlError(
+                'Mapping systemd status query failed'
+                + (f': {output}' if output else '.')
+            )
+
+        properties = {}
+
+        for line in output.splitlines():
+            if '=' not in line:
+                continue
+
+            key, value = line.split('=', 1)
+            properties[key.strip()] = value.strip()
+
+        try:
+            pid = int(
+                properties.get('MainPID', '0') or '0'
+            )
+        except ValueError as exc:
+            raise MappingControlError(
+                'Mapping systemd MainPID is invalid.'
+            ) from exc
+
+        active_state = properties.get(
+            'ActiveState',
+            'unknown',
+        )
+        sub_state = properties.get(
+            'SubState',
+            'unknown',
+        )
+        control_group = properties.get(
+            'ControlGroup',
+            '',
+        )
+
+        running = bool(
+            active_state == 'active'
+            and sub_state == 'running'
+            and pid > 0
+        )
+        owned = bool(
+            running
+            and control_group == self.SERVICE_CGROUP
+        )
+
+        return {
+            'active_state': active_state,
+            'sub_state': sub_state,
+            'running': running,
+            'owned': owned,
+            'pid': pid if pid > 0 else None,
+            'control_group': control_group,
+        }
+
+    def _run_systemctl(self, action):
+        """Run one fixed privileged mapping service operation."""
+        if action not in {'start', 'stop'}:
+            raise MappingControlError(
+                'Unsupported mapping systemd operation.'
+            )
+
+        command = [
+            str(self.SUDO_EXECUTABLE),
+            '-n',
+            str(self.SYSTEMCTL_EXECUTABLE),
+            action,
+            self.SERVICE,
+        ]
+
+        try:
+            completed = self._service_runner(
+                command,
+                cwd=str(Path.home()),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=30.0,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MappingControlError(
+                f'Mapping systemd {action} timed out.'
+            ) from exc
+        except OSError as exc:
+            raise MappingControlError(
+                f'Mapping systemd {action} failed: {exc}'
+            ) from exc
+
+        output = str(
+            getattr(completed, 'stdout', '')
+        ).strip()
+
+        if completed.returncode != 0:
+            raise MappingControlError(
+                f'Mapping systemd {action} failed'
+                + (f': {output}' if output else '.')
+            )
 
     def snapshot(self):
         """Return mapping ownership without changing runtime."""
         with self._lock:
-            self._refresh_locked()
+            service_error = None
 
-            running = self._process is not None
+            try:
+                service = self._query_service()
+            except MappingControlError as exc:
+                service_error = str(exc)
+                service = {
+                    'active_state': 'unknown',
+                    'sub_state': 'unknown',
+                    'running': False,
+                    'owned': False,
+                    'pid': None,
+                    'control_group': '',
+                }
+
+            running = service['running']
+            owned = service['owned']
+
+            if running and owned:
+                state = 'RUNNING'
+            elif service['active_state'] == 'active':
+                state = 'SERVICE_CONFLICT'
+            elif service_error is not None:
+                state = 'UNAVAILABLE'
+            else:
+                state = 'STOPPED'
 
             return {
                 'running': running,
-                'owned': running,
-                'pid': (
-                    int(self._process.pid)
-                    if running
-                    else None
-                ),
-                'state': (
-                    'RUNNING'
-                    if running
-                    else 'STOPPED'
-                ),
+                'owned': owned,
+                'pid': service['pid'],
+                'state': state,
                 'started_at': self._started_at,
                 'last_stopped_at': self._last_stopped_at,
-                'last_error': self._last_error,
+                'last_error': (
+                    service_error or self._last_error
+                ),
+                'systemd_service': self.SERVICE,
+                'service_active_state': (
+                    service['active_state']
+                ),
+                'service_sub_state': service['sub_state'],
+                'control_group': service['control_group'],
                 'launch': (
                     f'{self.PACKAGE}/'
                     f'{self.LAUNCH_FILE}'
@@ -163,23 +328,34 @@ class MappingControl:
             }
 
     def start(self, timestamp):
-        """Start one fixed headless mapping-only session."""
+        """Start the protected systemd-owned mapping service."""
         with self._lock:
-            self._refresh_locked()
+            current = self._query_service()
 
-            if self._process is not None:
+            if current['running']:
+                if not current['owned']:
+                    raise MappingConflictError(
+                        'Mapping service is active outside '
+                        'the expected systemd cgroup.'
+                    )
+
                 result = self.snapshot()
                 result['action'] = 'ALREADY_RUNNING'
                 result['started'] = False
                 return result
+
+            if current['active_state'] == 'active':
+                raise MappingConflictError(
+                    'Mapping service is active but is not '
+                    'a valid owned runtime.'
+                )
 
             external = self._process_finder(None)
 
             if external:
                 raise MappingConflictError(
                     'Mapping, localization, or Nav2 processes '
-                    'already exist outside Robot Bridge '
-                    'ownership: '
+                    'already exist outside systemd ownership: '
                     + ', '.join(
                         str(pid)
                         for pid in external
@@ -188,37 +364,22 @@ class MappingControl:
 
             self._verify_artifacts()
 
-            self._log_path.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
+            self._run_systemctl('start')
 
-            log_handle = self._log_path.open(
-                'ab',
-                buffering=0,
-            )
+            started = self._query_service()
 
-            try:
-                process = self._process_factory(
-                    self.command,
-                    cwd=str(Path.home()),
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            finally:
-                log_handle.close()
-
-            if process.poll() is not None:
+            if not (
+                started['running']
+                and started['owned']
+            ):
                 self._last_error = (
-                    'Mapping launch exited immediately.'
+                    'mayday-slam.service did not enter the '
+                    'expected active systemd cgroup.'
                 )
                 raise MappingControlError(
                     self._last_error
                 )
 
-            self._process = process
             self._started_at = timestamp
             self._last_error = None
 
@@ -235,27 +396,17 @@ class MappingControl:
         renamed, or removed by this method.
         """
         with self._lock:
-            self._refresh_locked()
+            runtime = self._query_service()
 
-            if self._process is None:
+            if not (
+                runtime['running']
+                and runtime['owned']
+            ):
                 raise MappingControlError(
                     'No owned mapping session is running.'
                 )
 
-            process = self._process
-            pid = int(process.pid)
-
-            if not self._identity_checker(pid):
-                raise MappingControlError(
-                    'Owned mapping PID identity changed; '
-                    'candidate export was not attempted.'
-                )
-
-            if self._get_process_group(pid) != pid:
-                raise MappingControlError(
-                    'Mapping is not its session leader; '
-                    'candidate export was not attempted.'
-                )
+            pid = runtime['pid']
 
             self._verify_export_tools()
 
@@ -510,7 +661,12 @@ class MappingControl:
 
             except Exception as exc:
                 try:
-                    if self._process is not None:
+                    runtime = self._query_service()
+
+                    if (
+                        runtime['running']
+                        and runtime['owned']
+                    ):
                         self.stop(timestamp)
                 except Exception:
                     pass
@@ -547,64 +703,48 @@ class MappingControl:
                 ) from exc
 
     def stop(self, timestamp):
-        """Stop only the mapping session this object owns."""
+        """Stop only the protected systemd mapping service."""
         with self._lock:
-            self._refresh_locked()
+            current = self._query_service()
 
-            if self._process is None:
+            if current['active_state'] != 'active':
                 result = self.snapshot()
                 result['action'] = 'ALREADY_STOPPED'
                 result['stopped'] = False
                 return result
 
-            process = self._process
-            pid = int(process.pid)
-
-            if not self._identity_checker(pid):
+            if not (
+                current['running']
+                and current['owned']
+            ):
                 self._last_error = (
-                    'Owned mapping PID identity changed; '
-                    'no signal was sent.'
+                    'Mapping service is active outside '
+                    'the expected systemd cgroup; '
+                    'stop was refused.'
                 )
                 raise MappingControlError(
                     self._last_error
                 )
 
-            process_group = self._get_process_group(pid)
+            pid = current['pid']
 
-            if process_group != pid:
+            self._run_systemctl('stop')
+
+            stopped = self._query_service()
+
+            if (
+                stopped['active_state'] == 'active'
+                or stopped['running']
+                or stopped['pid'] is not None
+            ):
                 self._last_error = (
-                    'Mapping is not its session leader; '
-                    'no signal was sent.'
+                    'mayday-slam.service remained active '
+                    'after systemd stop.'
                 )
                 raise MappingControlError(
                     self._last_error
                 )
 
-            self._signal_process_group(
-                process_group,
-                signal.SIGINT,
-            )
-
-            try:
-                process.wait(timeout=12.0)
-            except subprocess.TimeoutExpired:
-                self._signal_process_group(
-                    process_group,
-                    signal.SIGTERM,
-                )
-
-                try:
-                    process.wait(timeout=4.0)
-                except subprocess.TimeoutExpired as exc:
-                    self._last_error = (
-                        'Mapping did not stop after '
-                        'SIGINT and SIGTERM.'
-                    )
-                    raise MappingControlError(
-                        self._last_error
-                    ) from exc
-
-            self._process = None
             self._started_at = None
             self._last_stopped_at = timestamp
             self._last_error = None
@@ -616,11 +756,13 @@ class MappingControl:
             return result
 
     def shutdown(self):
-        """Best-effort shutdown when Robot Bridge exits."""
-        try:
-            self.stop('ROBOT_BRIDGE_SHUTDOWN')
-        except Exception:
-            pass
+        """
+        Leave systemd-owned mapping untouched when Robot Bridge exits.
+
+        Mapping lifetime is independent of the Robot Bridge process.
+        Explicit /mapping/stop remains the supported stop operation.
+        """
+        return None
 
     @staticmethod
     def _candidate_name(timestamp):

@@ -17,18 +17,78 @@ from mapping_control import (
 
 
 class FakeProcess:
-    def __init__(self, pid=4321, exited=False):
+    """Legacy export-test placeholder; no runtime ownership."""
+    def __init__(self, pid=4321):
         self.pid = pid
-        self.returncode = 1 if exited else None
-        self.wait_calls = []
 
-    def poll(self):
-        return self.returncode
 
-    def wait(self, timeout):
-        self.wait_calls.append(timeout)
-        self.returncode = 0
-        return 0
+class FakeServiceCompleted:
+    def __init__(self, returncode=0, stdout=''):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+class FakeServiceRunner:
+    def __init__(
+        self,
+        active=False,
+        pid=4321,
+        cgroup='/system.slice/mayday-slam.service',
+    ):
+        self.active = active
+        self.pid = pid
+        self.cgroup = cgroup
+        self.calls = []
+        self.actions = []
+
+    def __call__(self, command, **kwargs):
+        del kwargs
+        command = [str(value) for value in command]
+        self.calls.append(command)
+
+        if (
+            command[0] == '/usr/bin/systemctl'
+            and command[1] == 'show'
+        ):
+            return FakeServiceCompleted(
+                stdout=(
+                    'ActiveState='
+                    + ('active' if self.active else 'inactive')
+                    + '\n'
+                    + 'SubState='
+                    + ('running' if self.active else 'dead')
+                    + '\n'
+                    + 'MainPID='
+                    + (str(self.pid) if self.active else '0')
+                    + '\n'
+                    + 'ControlGroup='
+                    + (self.cgroup if self.active else '')
+                    + '\n'
+                )
+            )
+
+        if command[:3] == [
+            '/usr/bin/sudo',
+            '-n',
+            '/usr/bin/systemctl',
+        ]:
+            action = command[3]
+
+            assert command[4] == 'mayday-slam.service'
+            assert action in {'start', 'stop'}
+
+            self.actions.append(action)
+
+            if action == 'start':
+                self.active = True
+            else:
+                self.active = False
+
+            return FakeServiceCompleted()
+
+        raise AssertionError(
+            f'Unexpected service command: {command}'
+        )
 
 
 class FakeMappingControl:
@@ -80,67 +140,74 @@ class FakeMappingControl:
         return result
 
 
-def make_control(tmp_path, process_finder=None):
+def make_control(
+    tmp_path,
+    active=False,
+    process_finder=None,
+    cgroup='/system.slice/mayday-slam.service',
+):
     launch_path = tmp_path / 'slam.launch.py'
     launch_path.write_text(
         '# test launch\n',
         encoding='utf-8',
     )
 
-    process = FakeProcess()
-    calls = []
-    signals = []
-
-    def process_factory(command, **kwargs):
-        calls.append((command, kwargs))
-        return process
+    service = FakeServiceRunner(
+        active=active,
+        cgroup=cgroup,
+    )
 
     control = MappingControl(
         launch_path=launch_path,
         log_path=tmp_path / 'mapping.log',
-        process_factory=process_factory,
+        service_runner=service,
         process_finder=(
             process_finder
             or (lambda owned_pid: [])
         ),
-        identity_checker=lambda pid: pid == process.pid,
-        get_process_group=lambda pid: pid,
-        signal_process_group=(
-            lambda pgid, sig: signals.append(
-                (pgid, sig)
-            )
-        ),
     )
 
-    return control, process, calls, signals
+    return control, service
 
 
-def test_start_uses_fixed_headless_mapping_command(tmp_path):
-    control, process, calls, _ = make_control(tmp_path)
+def test_snapshot_adopts_active_systemd_service(tmp_path):
+    control, service = make_control(
+        tmp_path,
+        active=True,
+    )
+
+    snapshot = control.snapshot()
+
+    assert snapshot['running'] is True
+    assert snapshot['owned'] is True
+    assert snapshot['pid'] == service.pid
+    assert snapshot['state'] == 'RUNNING'
+    assert snapshot['systemd_service'] == (
+        'mayday-slam.service'
+    )
+    assert snapshot['control_group'] == (
+        '/system.slice/mayday-slam.service'
+    )
+
+
+def test_start_uses_protected_systemd_service(tmp_path):
+    control, service = make_control(tmp_path)
 
     result = control.start('start')
-    command, kwargs = calls[0]
 
     assert result['started'] is True
-    assert result['pid'] == process.pid
-    assert command[1:4] == [
+    assert result['pid'] == service.pid
+    assert service.actions == ['start']
+
+    assert control.command[1:4] == [
         'launch',
         'mini_pupper_slam',
         'slam.launch.py',
     ]
-    assert 'use_sim_time:=false' in command
-    assert 'use_rviz:=false' in command
-    assert kwargs['start_new_session'] is True
-    assert kwargs['stdin'] is subprocess.DEVNULL
-
-    joined = ' '.join(command)
-    assert 'planner_server' not in joined
-    assert 'controller_server' not in joined
-    assert 'map_saver' not in joined
 
 
 def test_duplicate_start_is_idempotent(tmp_path):
-    control, process, calls, _ = make_control(tmp_path)
+    control, service = make_control(tmp_path)
 
     first = control.start('first')
     second = control.start('second')
@@ -148,12 +215,12 @@ def test_duplicate_start_is_idempotent(tmp_path):
     assert first['started'] is True
     assert second['started'] is False
     assert second['action'] == 'ALREADY_RUNNING'
-    assert second['pid'] == process.pid
-    assert len(calls) == 1
+    assert second['pid'] == service.pid
+    assert service.actions == ['start']
 
 
 def test_external_process_is_rejected(tmp_path):
-    control, _, calls, _ = make_control(
+    control, service = make_control(
         tmp_path,
         process_finder=lambda owned_pid: [999],
     )
@@ -167,12 +234,15 @@ def test_external_process_is_rejected(tmp_path):
             'External process was not rejected.'
         )
 
-    assert calls == []
+    assert service.actions == []
 
 
 def test_missing_launch_is_rejected(tmp_path):
+    service = FakeServiceRunner()
+
     control = MappingControl(
         launch_path=tmp_path / 'missing.launch.py',
+        service_runner=service,
         process_finder=lambda owned_pid: [],
     )
 
@@ -185,42 +255,60 @@ def test_missing_launch_is_rejected(tmp_path):
             'Missing launch was accepted.'
         )
 
+    assert service.actions == []
 
-def test_owned_session_stops_verified_group(tmp_path):
-    control, process, _, signals = make_control(tmp_path)
 
-    control.start('start')
+def test_owned_session_stops_systemd_service(tmp_path):
+    control, service = make_control(
+        tmp_path,
+        active=True,
+    )
+
     result = control.stop('stop')
 
     assert result['stopped'] is True
     assert result['state'] == 'STOPPED'
-    assert result['stopped_pid'] == process.pid
-    assert signals == [
-        (process.pid, signal.SIGINT),
-    ]
-    assert process.wait_calls == [12.0]
+    assert result['stopped_pid'] == service.pid
+    assert service.actions == ['stop']
 
 
-def test_identity_change_blocks_signal(tmp_path):
-    control, process, _, signals = make_control(tmp_path)
-    control.start('start')
-    control._identity_checker = lambda pid: False
+def test_unexpected_cgroup_blocks_stop(tmp_path):
+    control, service = make_control(
+        tmp_path,
+        active=True,
+        cgroup='/system.slice/not-mayday.service',
+    )
 
     try:
         control.stop('stop')
     except MappingControlError as error:
-        assert 'identity changed' in str(error)
+        assert 'expected systemd cgroup' in str(error)
     else:
         raise AssertionError(
-            'Changed PID identity was signalled.'
+            'Unexpected service ownership was stopped.'
         )
 
-    assert process.poll() is None
-    assert signals == []
+    assert service.active is True
+    assert service.actions == []
+
+
+def test_bridge_shutdown_does_not_stop_systemd_mapping(
+    tmp_path,
+):
+    control, service = make_control(
+        tmp_path,
+        active=True,
+    )
+
+    control.shutdown()
+
+    assert service.active is True
+    assert service.actions == []
+    assert control.snapshot()['running'] is True
 
 
 def test_mapping_snapshot_has_no_save_or_motion(tmp_path):
-    control, _, _, _ = make_control(tmp_path)
+    control, _ = make_control(tmp_path)
     snapshot = control.snapshot()
 
     assert snapshot['headless'] is True
@@ -361,8 +449,12 @@ def make_export_control(tmp_path, fail_operation=None):
     candidate_root.mkdir()
 
     process = FakeProcess()
+    service = FakeServiceRunner(
+        active=False,
+        pid=process.pid,
+    )
     calls = []
-    signals = []
+    signals = service.actions
 
     def process_factory(command, **kwargs):
         del command
@@ -470,6 +562,7 @@ def make_export_control(tmp_path, fail_operation=None):
         candidate_root=candidate_root,
         converter_path=converter,
         command_runner=command_runner,
+        service_runner=service,
         process_factory=process_factory,
         process_finder=lambda owned_pid: [],
         identity_checker=lambda pid: pid == process.pid,
@@ -569,7 +662,8 @@ def test_candidate_export_creates_review_artifacts(
         'CANDIDATE_REVIEW_REQUIRED'
     )
     assert signals == [
-        (process.pid, signal.SIGINT),
+        'start',
+        'stop',
     ]
 
     joined_calls = [
