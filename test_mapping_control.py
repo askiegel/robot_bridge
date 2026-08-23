@@ -884,3 +884,164 @@ def test_immature_submaps_block_candidate_export(
     )
     assert list(candidate_root.iterdir()) == []
     assert control.snapshot()['running'] is False
+
+
+class _RunningMappingNavigationLifecycleGuard:
+    def snapshot(self):
+        return {
+            "running": True,
+            "owned": True,
+            "pid": 98765,
+            "state": "RUNNING",
+            "goal_submission_enabled": True,
+        }
+
+
+class _ForbiddenMappingMutationControl:
+    def __init__(self):
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.save_calls = 0
+
+    def snapshot(self):
+        return {
+            "running": True,
+            "owned": True,
+            "pid": 4321,
+            "state": "RUNNING",
+        }
+
+    def start(self, timestamp):
+        del timestamp
+        self.start_calls += 1
+        raise AssertionError(
+            "mapping start crossed lifecycle guard"
+        )
+
+    def stop(self, timestamp):
+        del timestamp
+        self.stop_calls += 1
+        raise AssertionError(
+            "mapping stop crossed lifecycle guard"
+        )
+
+    def save_candidate(self, timestamp):
+        del timestamp
+        self.save_calls += 1
+        raise AssertionError(
+            "candidate save crossed lifecycle guard"
+        )
+
+
+def _install_mapping_navigation_lifecycle_guard(
+    monkeypatch,
+):
+    control = _ForbiddenMappingMutationControl()
+
+    monkeypatch.setattr(
+        bridge,
+        "mapping_control",
+        control,
+    )
+
+    monkeypatch.setattr(
+        bridge,
+        "mapping_navigation_control",
+        _RunningMappingNavigationLifecycleGuard(),
+    )
+
+    monkeypatch.setattr(
+        bridge,
+        "stop_robot",
+        lambda: {
+            "ok": True,
+            "linear_x": 0.0,
+            "angular_z": 0.0,
+        },
+    )
+
+    return control
+
+
+def test_mapping_start_refuses_running_mapping_navigation(
+    monkeypatch,
+):
+    control = (
+        _install_mapping_navigation_lifecycle_guard(
+            monkeypatch
+        )
+    )
+
+    response = bridge.app.test_client().post(
+        "/mapping/start"
+    )
+
+    payload = response.get_json()
+
+    assert response.status_code == 409
+    assert payload["ok"] is False
+    assert (
+        payload["action"]
+        == "mapping_start"
+    )
+    assert (
+        payload["mapping_navigation"]["running"]
+        is True
+    )
+    assert control.start_calls == 0
+
+
+def test_mapping_stop_refuses_running_mapping_navigation(
+    monkeypatch,
+):
+    control = (
+        _install_mapping_navigation_lifecycle_guard(
+            monkeypatch
+        )
+    )
+
+    response = bridge.app.test_client().post(
+        "/mapping/stop"
+    )
+
+    payload = response.get_json()
+
+    assert response.status_code == 409
+    assert payload["ok"] is False
+    assert (
+        payload["action"]
+        == "mapping_stop"
+    )
+    assert (
+        payload["mapping_navigation"]["running"]
+        is True
+    )
+    assert control.stop_calls == 0
+
+
+def test_mapping_save_refuses_running_mapping_navigation(
+    monkeypatch,
+):
+    control = (
+        _install_mapping_navigation_lifecycle_guard(
+            monkeypatch
+        )
+    )
+
+    response = bridge.app.test_client().post(
+        "/mapping/save-candidate"
+    )
+
+    payload = response.get_json()
+
+    assert response.status_code == 409
+    assert payload["ok"] is False
+    assert (
+        payload["action"]
+        == "mapping_save_candidate"
+    )
+    assert (
+        payload["mapping_navigation"]["running"]
+        is True
+    )
+    assert control.save_calls == 0

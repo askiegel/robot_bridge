@@ -1437,6 +1437,29 @@ def mapping_start():
 
     timestamp = now_iso()
 
+    mapping_navigation = (
+        mapping_navigation_control.snapshot()
+    )
+
+    if (
+        mapping_navigation.get("running")
+        or mapping_navigation.get("owned")
+        or mapping_navigation.get("pid") is not None
+    ):
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_start',
+            'timestamp': timestamp,
+            'error': (
+                'Mapping navigation is active or still '
+                'owned; mapping start was refused. Stop '
+                'mapping navigation first.'
+            ),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+            'mapping_navigation': mapping_navigation,
+        }), 409
+
     if localization_control.snapshot().get('running'):
         return jsonify({
             'ok': False,
@@ -1542,6 +1565,29 @@ def mapping_save_candidate():
             'mapping': mapping_control.snapshot(),
         }), 503
 
+    mapping_navigation = (
+        mapping_navigation_control.snapshot()
+    )
+
+    if (
+        mapping_navigation.get("running")
+        or mapping_navigation.get("owned")
+        or mapping_navigation.get("pid") is not None
+    ):
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_save_candidate',
+            'timestamp': timestamp,
+            'error': (
+                'Mapping navigation is active or still '
+                'owned; candidate export was refused. Stop '
+                'mapping navigation first.'
+            ),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+            'mapping_navigation': mapping_navigation,
+        }), 409
+
     try:
         result = mapping_control.save_candidate(
             timestamp,
@@ -1581,6 +1627,29 @@ def mapping_save_candidate():
 def mapping_stop():
     stop_result = stop_robot()
     timestamp = now_iso()
+
+    mapping_navigation = (
+        mapping_navigation_control.snapshot()
+    )
+
+    if (
+        mapping_navigation.get("running")
+        or mapping_navigation.get("owned")
+        or mapping_navigation.get("pid") is not None
+    ):
+        return jsonify({
+            'ok': False,
+            'action': 'mapping_stop',
+            'timestamp': timestamp,
+            'error': (
+                'Mapping navigation is active or still '
+                'owned; mapping stop was refused. Stop '
+                'mapping navigation first.'
+            ),
+            'stop_result': stop_result,
+            'mapping': mapping_control.snapshot(),
+            'mapping_navigation': mapping_navigation,
+        }), 409
 
     try:
         result = mapping_control.stop(timestamp)
