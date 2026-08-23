@@ -60,6 +60,11 @@ from navigation_control import (
     NavigationControl,
     NavigationControlError,
 )
+from mapping_navigation_control import (
+    MappingNavigationConflictError,
+    MappingNavigationControl,
+    MappingNavigationControlError,
+)
 from planning_control import (
     PlanningConflictError,
     PlanningControl,
@@ -137,6 +142,9 @@ localization_control = LocalizationControl()
 mapping_control = MappingControl()
 planning_control = PlanningControl()
 navigation_control = NavigationControl()
+mapping_navigation_control = MappingNavigationControl(
+    mapping_state_provider=mapping_control.snapshot,
+)
 mapping_requirements = mapping_control.snapshot()
 mapping_readiness_telemetry = (
     MappingReadinessTelemetry(
@@ -169,6 +177,9 @@ map_promotion = MapPromotion(
         'localization': localization_control.snapshot(),
         'planning': planning_control.snapshot(),
         'navigation': navigation_control.snapshot(),
+        'mapping_navigation': (
+            mapping_navigation_control.snapshot()
+        ),
     },
 )
 
@@ -176,6 +187,7 @@ atexit.register(localization_control.shutdown)
 atexit.register(mapping_control.shutdown)
 atexit.register(planning_control.shutdown)
 atexit.register(navigation_control.shutdown)
+atexit.register(mapping_navigation_control.shutdown)
 
 
 def now_iso():
@@ -415,6 +427,14 @@ class RobotBridgePublisher(Node):
 
     def mapping_pose_snapshot(self):
         return self.mapping_pose_provider.snapshot()
+
+    def execute_mapping_navigation_goal(self, payload):
+        pose_snapshot = self.mapping_pose_snapshot()
+
+        return self.navigation_goal_service.execute(
+            payload,
+            pose_snapshot,
+        )
 
     def execute_navigation_goal(self, payload):
         try:
@@ -1595,6 +1615,537 @@ def mapping_stop():
     }), (
         200
         if stop_result.get('ok')
+        else 503
+    )
+
+
+\
+@app.route(
+    "/mapping-navigation/status",
+    methods=["GET"],
+)
+def mapping_navigation_control_status():
+    return jsonify({
+        "ok": True,
+        "service": "mini_pupper_robot_bridge",
+        "timestamp": now_iso(),
+        "mapping_navigation": (
+            mapping_navigation_control.snapshot()
+        ),
+    })
+
+
+@app.route(
+    "/mapping-navigation/start",
+    methods=["POST"],
+)
+def mapping_navigation_start():
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    if not stop_result.get("ok"):
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": (
+                "Safety zero could not be published; "
+                "mapping navigation was not started."
+            ),
+            "stop_result": stop_result,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+
+    mapping = mapping_control.snapshot()
+
+    if not (
+        mapping.get("running")
+        and mapping.get("owned")
+    ):
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": (
+                "Owned live Cartographer mapping "
+                "runtime is required."
+            ),
+            "stop_result": stop_result,
+            "mapping": mapping,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 409
+
+    conflicts = (
+        (
+            "Saved-map navigation",
+            navigation_control.snapshot(),
+        ),
+        (
+            "Planning",
+            planning_control.snapshot(),
+        ),
+        (
+            "Standalone localization",
+            localization_control.snapshot(),
+        ),
+    )
+
+    for name, state in conflicts:
+        if state.get("running"):
+            return jsonify({
+                "ok": False,
+                "action": "mapping_navigation_start",
+                "timestamp": timestamp,
+                "error": (
+                    f"{name} is running; mapping "
+                    "navigation was not started."
+                ),
+                "stop_result": stop_result,
+                "mapping": mapping,
+                "mapping_navigation": (
+                    mapping_navigation_control.snapshot()
+                ),
+            }), 409
+
+    if not ros_ready or publisher_node is None:
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": (
+                ros_error
+                or "ROS2 is not ready; mapping "
+                "navigation was not started."
+            ),
+            "stop_result": stop_result,
+            "mapping": mapping,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+
+    try:
+        preflight = (
+            publisher_node.navigation_start_preflight()
+        )
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": (
+                "Mapping-navigation startup "
+                f"preflight failed: {exc}"
+            ),
+            "stop_result": stop_result,
+            "mapping": mapping,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+
+    if not preflight.get("ok"):
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": (
+                "Mapping-navigation startup "
+                "preflight rejected the request."
+            ),
+            "preflight": preflight,
+            "stop_result": stop_result,
+            "mapping": mapping,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+
+    try:
+        mapping_pose = (
+            publisher_node.mapping_pose_snapshot()
+        )
+
+        NavigationGoalService.validate_pose(
+            mapping_pose
+        )
+    except NavigationGoalValidationError as exc:
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": (
+                "Live mapping pose is not ready: "
+                f"{exc}"
+            ),
+            "preflight": preflight,
+            "mapping_pose": (
+                mapping_pose
+                if "mapping_pose" in locals()
+                else None
+            ),
+            "stop_result": stop_result,
+            "mapping": mapping,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": (
+                "Live mapping pose check failed: "
+                f"{exc}"
+            ),
+            "preflight": preflight,
+            "stop_result": stop_result,
+            "mapping": mapping,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+
+    try:
+        result = mapping_navigation_control.start(
+            timestamp
+        )
+    except MappingNavigationConflictError as exc:
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "stop_result": stop_result,
+            "mapping": mapping,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 409
+    except MappingNavigationControlError as exc:
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_start",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "stop_result": stop_result,
+            "mapping": mapping,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+
+    status_code = (
+        201
+        if result.get("started")
+        else 200
+    )
+
+    return jsonify({
+        "ok": True,
+        "action": "mapping_navigation_start",
+        "timestamp": timestamp,
+        "message": (
+            "Guarded live-mapping navigation "
+            "runtime started without submitting "
+            "a goal."
+            if result.get("started")
+            else (
+                "Guarded live-mapping navigation "
+                "runtime is already running."
+            )
+        ),
+        "stop_result": stop_result,
+        "mapping": mapping,
+        "mapping_pose": mapping_pose,
+        "mapping_navigation": result,
+    }), status_code
+
+
+@app.route(
+    "/mapping-navigation/goal",
+    methods=["POST"],
+)
+def mapping_navigation_goal():
+    initial_stop_result = stop_robot()
+    timestamp = now_iso()
+
+    mapping_navigation = (
+        mapping_navigation_control.snapshot()
+    )
+
+    if not initial_stop_result.get("ok"):
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": (
+                "Safety zero could not be published; "
+                "the mapping-navigation goal was "
+                "not submitted."
+            ),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation
+            ),
+        }), 503
+
+    if (
+        not mapping_navigation.get("running")
+        or not mapping_navigation.get("owned")
+        or not mapping_navigation.get(
+            "goal_submission_enabled"
+        )
+    ):
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": (
+                "Owned live-mapping navigation "
+                "runtime is not ready for goals."
+            ),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation
+            ),
+        }), 409
+
+    if not ros_ready or publisher_node is None:
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": (
+                ros_error
+                or "ROS2 navigation client is "
+                "not ready."
+            ),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation
+            ),
+        }), 503
+
+    payload = request.get_json(silent=True)
+
+    try:
+        result = (
+            publisher_node
+            .execute_mapping_navigation_goal(
+                payload
+            )
+        )
+    except NavigationGoalValidationError as exc:
+        final_stop_result = stop_robot()
+
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "final_stop_result": (
+                final_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 400
+    except NavigationGoalConflictError as exc:
+        final_stop_result = stop_robot()
+
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "final_stop_result": (
+                final_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 409
+    except NavigationGoalCancelledError as exc:
+        final_stop_result = stop_robot()
+
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "final_stop_result": (
+                final_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 409
+    except NavigationGoalTimeoutError as exc:
+        final_stop_result = stop_robot()
+
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "final_stop_result": (
+                final_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 504
+    except NavigationGoalUnavailableError as exc:
+        final_stop_result = stop_robot()
+
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "final_stop_result": (
+                final_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+    except NavigationGoalError as exc:
+        final_stop_result = stop_robot()
+
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "final_stop_result": (
+                final_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+
+    final_stop_result = stop_robot()
+
+    if not final_stop_result.get("ok"):
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_goal",
+            "timestamp": timestamp,
+            "error": (
+                "Mapping-navigation goal completed "
+                "but the final safety zero could "
+                "not be published."
+            ),
+            "initial_stop_result": (
+                initial_stop_result
+            ),
+            "final_stop_result": (
+                final_stop_result
+            ),
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+            "result": result,
+        }), 503
+
+    return jsonify({
+        "ok": True,
+        "action": "mapping_navigation_goal",
+        "timestamp": timestamp,
+        "message": (
+            "One bounded live-mapping navigation "
+            "goal completed."
+        ),
+        "initial_stop_result": (
+            initial_stop_result
+        ),
+        "final_stop_result": (
+            final_stop_result
+        ),
+        "mapping_navigation": (
+            mapping_navigation_control.snapshot()
+        ),
+        "result": result,
+    }), 200
+
+
+@app.route(
+    "/mapping-navigation/stop",
+    methods=["POST"],
+)
+def mapping_navigation_stop():
+    cancel_result = cancel_navigation_goal()
+    stop_result = stop_robot()
+    timestamp = now_iso()
+
+    try:
+        result = mapping_navigation_control.stop(
+            timestamp
+        )
+    except MappingNavigationControlError as exc:
+        return jsonify({
+            "ok": False,
+            "action": "mapping_navigation_stop",
+            "timestamp": timestamp,
+            "error": str(exc),
+            "cancel_result": cancel_result,
+            "stop_result": stop_result,
+            "mapping_navigation": (
+                mapping_navigation_control.snapshot()
+            ),
+        }), 503
+
+    return jsonify({
+        "ok": bool(stop_result.get("ok")),
+        "action": "mapping_navigation_stop",
+        "timestamp": timestamp,
+        "message": (
+            "Guarded live-mapping navigation "
+            "runtime stopped."
+            if result.get("stopped")
+            else (
+                "Guarded live-mapping navigation "
+                "runtime was already stopped."
+            )
+        ),
+        "cancel_result": cancel_result,
+        "stop_result": stop_result,
+        "mapping_navigation": result,
+    }), (
+        200
+        if stop_result.get("ok")
         else 503
     )
 
