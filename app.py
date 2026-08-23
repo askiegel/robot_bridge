@@ -40,6 +40,7 @@ from localization_control import (
     LocalizationControlError,
 )
 from localization_telemetry import LocalizationTelemetry
+from mapping_pose import MappingPoseProvider
 from mapping_control import (
     MappingConflictError,
     MappingControl,
@@ -211,6 +212,11 @@ class RobotBridgePublisher(Node):
             self,
             spin_thread=False,
             qos=navigation_tf_qos,
+        )
+
+        self.mapping_pose_provider = MappingPoseProvider(
+            self,
+            self.navigation_tf_buffer,
         )
 
         self.planning_path_service = (
@@ -406,6 +412,9 @@ class RobotBridgePublisher(Node):
         return self.planning_path_service.compute(
             payload
         )
+
+    def mapping_pose_snapshot(self):
+        return self.mapping_pose_provider.snapshot()
 
     def execute_navigation_goal(self, payload):
         try:
@@ -889,6 +898,77 @@ def live_mapping_status():
         'authoritative': False,
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
+
+    return response, 200 if available else 503
+
+
+@app.route(
+    "/telemetry/mapping-pose",
+    methods=["GET"],
+)
+def live_mapping_pose_status():
+    mapping = mapping_control.snapshot()
+
+    runtime_active = bool(
+        mapping.get("running")
+        and mapping.get("owned")
+    )
+
+    if not runtime_active:
+        telemetry = {
+            "available": False,
+            "status": "MAPPING_STOPPED",
+            "source": "cartographer_tf",
+            "age_seconds": None,
+            "error": None,
+            "pose": None,
+        }
+    elif not ros_ready or publisher_node is None:
+        telemetry = {
+            "available": False,
+            "status": "ROS_NOT_READY",
+            "source": "cartographer_tf",
+            "age_seconds": None,
+            "error": (
+                ros_error
+                or "ROS2 publisher is not ready."
+            ),
+            "pose": None,
+        }
+    else:
+        try:
+            telemetry = (
+                publisher_node.mapping_pose_snapshot()
+            )
+        except Exception as exc:
+            telemetry = {
+                "available": False,
+                "status": "TF_UNAVAILABLE",
+                "source": "cartographer_tf",
+                "age_seconds": None,
+                "error": str(exc),
+                "pose": None,
+            }
+
+    available = bool(
+        runtime_active
+        and telemetry.get("available")
+    )
+
+    response = jsonify({
+        "ok": available,
+        "service": "mini_pupper_robot_bridge",
+        "runtime_active": runtime_active,
+        "mapping": mapping,
+        "telemetry": telemetry,
+        "timestamp": now_iso(),
+        "source": "live_cartographer_tf",
+        "read_only": True,
+    })
+
+    response.headers[
+        "Access-Control-Allow-Origin"
+    ] = "*"
 
     return response, 200 if available else 503
 
