@@ -50,6 +50,7 @@ def make_control(
     process=None,
     process_finder=None,
     signals=None,
+    action_server_ready_provider=None,
 ):
     ros2 = tmp_path / "ros2"
     ros2.write_text("", encoding="utf-8")
@@ -75,6 +76,10 @@ def make_control(
             lambda pgid, sig: signals.append(
                 (pgid, sig)
             )
+        ),
+        action_server_ready_provider=(
+            action_server_ready_provider
+            or (lambda: True)
         ),
     ), fake_process, signals
 
@@ -147,6 +152,68 @@ def test_start_exposes_live_mapping_mode(tmp_path):
         result["maximum_execution_seconds"]
         == 15.0
     )
+
+
+def test_running_launch_is_starting_until_action_server_ready(
+    tmp_path,
+):
+    ready = {"value": False}
+
+    control, process, _ = make_control(
+        tmp_path,
+        action_server_ready_provider=(
+            lambda: ready["value"]
+        ),
+    )
+
+    result = control.start(
+        "2026-08-23T19:00:00Z"
+    )
+
+    assert result["running"] is True
+    assert result["owned"] is True
+    assert result["pid"] == process.pid
+    assert result["mapping_ready"] is True
+    assert result["state"] == "STARTING"
+    assert result["action_server_ready"] is False
+    assert result["execution_enabled"] is False
+    assert result["goal_submission_enabled"] is False
+    assert result["controller_enabled"] is False
+    assert result["navigator_enabled"] is False
+
+    ready["value"] = True
+
+    result = control.snapshot()
+
+    assert result["running"] is True
+    assert result["owned"] is True
+    assert result["state"] == "RUNNING"
+    assert result["action_server_ready"] is True
+    assert result["execution_enabled"] is True
+    assert result["goal_submission_enabled"] is True
+    assert result["controller_enabled"] is True
+    assert result["navigator_enabled"] is True
+
+
+def test_action_readiness_provider_failure_fails_closed(
+    tmp_path,
+):
+    def fail():
+        raise RuntimeError("probe failed")
+
+    control, _, _ = make_control(
+        tmp_path,
+        action_server_ready_provider=fail,
+    )
+
+    result = control.start(
+        "2026-08-23T19:00:00Z"
+    )
+
+    assert result["running"] is True
+    assert result["state"] == "STARTING"
+    assert result["action_server_ready"] is False
+    assert result["goal_submission_enabled"] is False
 
 
 def test_cartographer_is_not_a_conflict():

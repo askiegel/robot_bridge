@@ -47,6 +47,7 @@ class MappingNavigationControl:
         identity_checker=None,
         get_process_group=None,
         signal_process_group=None,
+        action_server_ready_provider=None,
     ):
         if not callable(mapping_state_provider):
             raise TypeError(
@@ -101,6 +102,18 @@ class MappingNavigationControl:
         self._signal_process_group = (
             signal_process_group or os.killpg
         )
+        self._action_server_ready_provider = (
+            action_server_ready_provider
+            or (lambda: False)
+        )
+
+        if not callable(
+            self._action_server_ready_provider
+        ):
+            raise TypeError(
+                "action_server_ready_provider "
+                "must be callable."
+            )
 
         self._lock = threading.RLock()
         self._process = None
@@ -167,16 +180,30 @@ class MappingNavigationControl:
 
             running = self._process is not None
 
+            action_server_ready = False
+
             if running and mapping_ready:
+                try:
+                    action_server_ready = bool(
+                        self._action_server_ready_provider()
+                    )
+                except Exception:
+                    action_server_ready = False
+
+            enabled = bool(
+                running
+                and mapping_ready
+                and action_server_ready
+            )
+
+            if enabled:
                 state = "RUNNING"
+            elif running and mapping_ready:
+                state = "STARTING"
             elif running:
                 state = "MAPPING_UNAVAILABLE"
             else:
                 state = "STOPPED"
-
-            enabled = bool(
-                running and mapping_ready
-            )
 
             return {
                 "running": running,
@@ -200,6 +227,9 @@ class MappingNavigationControl:
                 "mapping": mapping,
                 "map_source": "live_cartographer_map",
                 "pose_source": "cartographer_tf",
+                "action_server_ready": (
+                    action_server_ready
+                ),
                 "planning_enabled": enabled,
                 "navigation_enabled": enabled,
                 "control_enabled": enabled,

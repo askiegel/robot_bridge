@@ -275,6 +275,22 @@ def test_fixed_guarded_goal_succeeds():
     )
 
 
+def test_action_server_ready_uses_existing_client_without_goal():
+    service, client = make_service()
+
+    client.available = True
+
+    assert service.action_server_ready() is True
+    assert client.server_timeout == 0.0
+    assert client.sent_goal is None
+
+    client.available = False
+
+    assert service.action_server_ready() is False
+    assert client.server_timeout == 0.0
+    assert client.sent_goal is None
+
+
 def test_unavailable_action_server_is_blocked():
     service, client = make_service()
     client.available = False

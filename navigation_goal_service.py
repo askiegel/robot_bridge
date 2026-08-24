@@ -73,6 +73,14 @@ class NavigationGoalService:
         self._active_goal_handle = None
         self._cancel_requested = False
 
+    def action_server_ready(self):
+        """Return whether the existing NavigateToPose server is ready."""
+        return bool(
+            self._client.wait_for_server(
+                timeout_sec=0.0
+            )
+        )
+
     @staticmethod
     def _finite_number(value, name):
         if isinstance(value, bool):

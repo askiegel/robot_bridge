@@ -144,6 +144,12 @@ planning_control = PlanningControl()
 navigation_control = NavigationControl()
 mapping_navigation_control = MappingNavigationControl(
     mapping_state_provider=mapping_control.snapshot,
+    action_server_ready_provider=lambda: bool(
+        publisher_node is not None
+        and publisher_node
+        .navigation_goal_service
+        .action_server_ready()
+    ),
 )
 mapping_requirements = mapping_control.snapshot()
 mapping_readiness_telemetry = (
