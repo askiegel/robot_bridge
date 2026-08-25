@@ -150,7 +150,7 @@ def test_start_exposes_live_mapping_mode(tmp_path):
     )
     assert (
         result["maximum_execution_seconds"]
-        == 15.0
+        == 25.0
     )
 
 

@@ -250,7 +250,7 @@ def test_fixed_guarded_goal_succeeds():
     ] == 0.50
     assert result[
         "maximum_execution_seconds"
-    ] == 15.0
+    ] == 25.0
     assert result[
         "requested_distance_meters"
     ] == pytest.approx(math.hypot(0.15, 0.10))
@@ -424,7 +424,7 @@ def test_source_contains_no_retry_or_recovery_loop():
     assert "Spin" not in source
     assert "RecoveryNode" not in source
     assert "MAXIMUM_GOAL_DISTANCE_METERS = 0.50" in source
-    assert "MAXIMUM_EXECUTION_SECONDS = 15.0" in source
+    assert "MAXIMUM_EXECUTION_SECONDS = 25.0" in source
 
 
 def test_executor_is_connected_only_to_guarded_route():

@@ -37,7 +37,7 @@ def running_mapping_navigation():
         "execution_enabled": True,
         "goal_submission_enabled": True,
         "maximum_goal_distance_meters": 0.50,
-        "maximum_execution_seconds": 15.0,
+        "maximum_execution_seconds": 25.0,
     }
 
 
@@ -143,7 +143,7 @@ class FakePublisher:
                 "executed": True,
                 "bounded": True,
                 "maximum_goal_distance_meters": 0.50,
-                "maximum_execution_seconds": 15.0,
+                "maximum_execution_seconds": 25.0,
             }
         )
         self.goal_error = goal_error

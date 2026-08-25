@@ -141,7 +141,7 @@ def test_snapshot_exposes_runtime_without_goal_execution(
     assert snapshot["controller_enabled"] is True
     assert snapshot["navigator_enabled"] is True
     assert snapshot["maximum_goal_distance_meters"] == 0.50
-    assert snapshot["maximum_execution_seconds"] == 15.0
+    assert snapshot["maximum_execution_seconds"] == 25.0
 
 
 def test_start_owns_guarded_navigation_session(tmp_path):

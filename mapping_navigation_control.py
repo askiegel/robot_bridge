@@ -34,7 +34,7 @@ class MappingNavigationControl:
     LAUNCH_FILE = "mapping_navigation.launch.py"
 
     MAXIMUM_GOAL_DISTANCE_METERS = 0.50
-    MAXIMUM_EXECUTION_SECONDS = 15.0
+    MAXIMUM_EXECUTION_SECONDS = 25.0
 
     def __init__(
         self,
