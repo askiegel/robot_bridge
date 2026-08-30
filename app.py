@@ -25,6 +25,12 @@ from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer
 from tf2_ros import TransformException
 from tf2_ros import TransformListener
+from tf2_msgs.msg import TFMessage
+
+from navigation_tf_filter import (
+    NAVIGATION_TF_TOPIC,
+    filter_navigation_tf,
+)
 
 from candidate_map_telemetry import (
     CandidateMapTelemetry,
@@ -232,6 +238,28 @@ class RobotBridgePublisher(Node):
             qos=navigation_tf_qos,
         )
 
+        navigation_tf_output_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
+        self.navigation_tf_publisher = self.create_publisher(
+            TFMessage,
+            NAVIGATION_TF_TOPIC,
+            navigation_tf_output_qos,
+        )
+
+        self.navigation_tf_filter_subscription = (
+            self.create_subscription(
+                TFMessage,
+                "/tf",
+                self.publish_navigation_tf,
+                navigation_tf_qos,
+            )
+        )
+
         self.mapping_pose_provider = MappingPoseProvider(
             self,
             self.navigation_tf_buffer,
@@ -316,6 +344,12 @@ class RobotBridgePublisher(Node):
             "Robot Bridge mapping readiness ready on "
             "/submap_list"
         )
+
+    def publish_navigation_tf(self, message):
+        filtered = filter_navigation_tf(message)
+
+        if filtered is not None:
+            self.navigation_tf_publisher.publish(filtered)
 
     def update_lidar(self, message):
         lidar_telemetry.update(message)
