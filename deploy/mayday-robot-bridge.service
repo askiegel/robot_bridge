@@ -1,0 +1,31 @@
+[Unit]
+Description=Mayday Robot Bridge
+Wants=network-online.target mayday-bringup.service
+After=network-online.target mayday-bringup.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/robot_bridge
+
+Environment=HOME=/home/ubuntu
+Environment=ROS_DOMAIN_ID=42
+Environment=ROS_LOCALHOST_ONLY=0
+Environment=RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+
+UnsetEnvironment=ROS_DISCOVERY_SERVER
+UnsetEnvironment=ROS_SUPER_CLIENT
+UnsetEnvironment=FASTRTPS_DEFAULT_PROFILES_FILE
+UnsetEnvironment=FASTDDS_DEFAULT_PROFILES_FILE
+
+ExecStart=/usr/bin/bash -lc 'source /opt/ros/humble/setup.bash; source /home/ubuntu/ros2_ws/install/setup.bash; for i in $(seq 1 120); do if timeout 3 ros2 node list --no-daemon 2>/dev/null | grep -Fxq /quadruped_controller_node; then exec /usr/bin/python3 -u /home/ubuntu/robot_bridge/app.py; fi; sleep 1; done; exit 1'
+
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
