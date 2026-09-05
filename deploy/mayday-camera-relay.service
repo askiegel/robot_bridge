@@ -1,0 +1,26 @@
+[Unit]
+Description=Mayday Camera HTTP Relay
+Wants=network-online.target mayday-bringup.service
+After=network-online.target mayday-bringup.service mayday-robot-bridge.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/robot_bridge
+
+Environment=HOME=/home/ubuntu
+Environment=ROS_DOMAIN_ID=42
+Environment=ROS_LOCALHOST_ONLY=0
+Environment=RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/usr/bin/bash -lc 'source /opt/ros/humble/setup.bash; source /home/ubuntu/ros2_ws/install/setup.bash; exec /usr/bin/python3 -u /home/ubuntu/robot_bridge/camera_relay.py'
+
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
