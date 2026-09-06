@@ -1,125 +1,135 @@
 from pathlib import Path
 
-from geometry_msgs.msg import TransformStamped
-from tf2_msgs.msg import TFMessage
 
-from navigation_tf_filter import (
-    NAVIGATION_TF_FRAME_PAIRS,
-    NAVIGATION_TF_TOPIC,
-    filter_navigation_tf,
-)
-
-
-def make_transform(parent, child):
-    transform = TransformStamped()
-    transform.header.frame_id = parent
-    transform.child_frame_id = child
-
-    return transform
-
-
-def test_filter_keeps_only_remote_navigation_frames():
-    message = TFMessage()
-
-    message.transforms = [
-        make_transform("odom", "base_footprint"),
-        make_transform("base_footprint", "base_link"),
-        make_transform("base_link", "lf1"),
-        make_transform("lf1", "lf2"),
-        make_transform("rf1", "rf2"),
-    ]
-
-    filtered = filter_navigation_tf(message)
-
-    assert filtered is not None
-
-    actual = [
-        (
-            transform.header.frame_id,
-            transform.child_frame_id,
-        )
-        for transform in filtered.transforms
-    ]
-
-    assert actual == [
-        ("odom", "base_footprint"),
-        ("base_footprint", "base_link"),
-    ]
-
-
-def test_filter_accepts_leading_slashes():
-    message = TFMessage()
-
-    message.transforms = [
-        make_transform(
-            "/odom",
-            "/base_footprint",
-        ),
-        make_transform(
-            "/base_footprint",
-            "/base_link",
-        ),
-    ]
-
-    filtered = filter_navigation_tf(message)
-
-    assert filtered is not None
-    assert len(filtered.transforms) == 2
-
-
-def test_filter_drops_leg_only_message():
-    message = TFMessage()
-
-    message.transforms = [
-        make_transform("base_link", "lf1"),
-        make_transform("lf1", "lf2"),
-        make_transform("lf2", "lf3"),
-    ]
-
-    assert filter_navigation_tf(message) is None
-
-
-def test_filter_contract_is_narrow():
-    assert NAVIGATION_TF_TOPIC == (
-        "/mayday_navigation_tf"
-    )
-
-    assert NAVIGATION_TF_FRAME_PAIRS == frozenset(
-        {
-            ("odom", "base_footprint"),
-            ("base_footprint", "base_link"),
-        }
-    )
-
-
-def test_robot_bridge_wires_filtered_tf_publisher():
-    source = Path("app.py").read_text(
-        encoding="utf-8"
-    )
-
-    for required in (
-        "NAVIGATION_TF_TOPIC",
-        "filter_navigation_tf",
-        "self.navigation_tf_publisher",
-        "self.navigation_tf_filter_subscription",
-        "self.publish_navigation_tf",
-        '"/tf",',
-    ):
-        assert required in source
-
-
-def test_filter_has_no_motion_capability():
+def robot_bridge_source():
     source = Path(
-        "navigation_tf_filter.py"
+        "app.py"
     ).read_text(
         encoding="utf-8"
     )
 
-    for forbidden in (
-        "Twist",
-        "cmd_vel",
-        "NavigateToPose",
-        "ActionClient",
-        "servo",
-    ):
-        assert forbidden not in source
+    return source[
+        source.index(
+            "class RobotBridgePublisher"
+        ):
+        source.index(
+            "def ros_spin():"
+        )
+    ]
+
+
+def preflight_source():
+    source = robot_bridge_source()
+
+    start = source.index(
+        "    def navigation_start_preflight("
+    )
+
+    end = source.index(
+        "    def initialize_planning_localization(",
+        start,
+    )
+
+    return source[
+        start:end
+    ]
+
+
+def test_navigation_tf_relay_is_not_permanent():
+    source = robot_bridge_source()
+
+    assert (
+        "navigation_tf_publisher"
+        not in source
+    )
+
+    assert (
+        "navigation_tf_history"
+        not in source
+    )
+
+    assert (
+        "navigation_tf_publish_timer"
+        not in source
+    )
+
+    assert (
+        "navigation_preflight_tf"
+        not in source
+    )
+
+
+def test_normal_scan_and_local_odom_telemetry_remain():
+    source = robot_bridge_source()
+
+    assert "'/scan'," in source
+    assert "'/odom/local'," in source
+
+    assert (
+        "self.latest_scan_stamp"
+        in source
+    )
+
+    assert (
+        "self.latest_local_odom_received_at"
+        in source
+    )
+
+
+def test_preflight_starts_tf_before_selecting_fresh_scan():
+    source = preflight_source()
+
+    session = source.index(
+        "with self.navigation_tf_lookup.session() "
+        "as tf_lookup:"
+    )
+
+    listener_time = source.index(
+        "listener_started_at = time.monotonic()"
+    )
+
+    fresh_check = source.index(
+        "> listener_started_at"
+    )
+
+    lookup = source.index(
+        "tf_lookup.lookup_transform("
+    )
+
+    assert session < listener_time
+    assert listener_time < fresh_check
+    assert fresh_check < lookup
+
+
+def test_preflight_keeps_exact_scan_timestamp_semantics():
+    source = preflight_source()
+
+    assert (
+        "Time.from_msg("
+        in source
+    )
+
+    assert (
+        "scan_stamp"
+        in source
+    )
+
+    assert (
+        "tf_lookup.lookup_transform("
+        in source
+    )
+
+    assert (
+        "Time.from_msg("
+        in source
+    )
+
+    lookup = source.index(
+        "tf_lookup.lookup_transform("
+    )
+
+    accepted = source.index(
+        "scan_stamp = candidate_stamp"
+    )
+
+    assert lookup < accepted

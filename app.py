@@ -22,15 +22,10 @@ from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from tf2_ros import Buffer
 from tf2_ros import TransformException
-from tf2_ros import TransformListener
 from tf2_msgs.msg import TFMessage
 
-from navigation_tf_filter import (
-    NAVIGATION_TF_TOPIC,
-    filter_navigation_tf,
-)
+from transient_tf_lookup import TransientTfLookup
 
 from candidate_map_telemetry import (
     CandidateMapTelemetry,
@@ -222,47 +217,21 @@ class RobotBridgePublisher(Node):
         self.latest_scan_received_at = None
         self.latest_local_odom_received_at = None
 
-        self.navigation_tf_buffer = Buffer()
+        # Mapping pose may still require map -> odom,
+        # so it uses a short-lived TF listener only when
+        # explicitly requested.
+        self.navigation_tf_lookup = TransientTfLookup()
 
-        navigation_tf_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-        )
-
-        self.navigation_tf_listener = TransformListener(
-            self.navigation_tf_buffer,
-            self,
-            spin_thread=False,
-            qos=navigation_tf_qos,
-        )
-
-        navigation_tf_output_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-        )
-
-        self.navigation_tf_publisher = self.create_publisher(
-            TFMessage,
-            NAVIGATION_TF_TOPIC,
-            navigation_tf_output_qos,
-        )
-
-        self.navigation_tf_filter_subscription = (
-            self.create_subscription(
-                TFMessage,
-                "/tf",
-                self.publish_navigation_tf,
-                navigation_tf_qos,
-            )
-        )
+        # Navigation TF is intentionally demand-driven.
+        #
+        # Normal Robot Bridge operation must not consume /tf,
+        # /tf_static, or a second /odom stream. Exact scan-time
+        # validation creates a short-lived full-TF listener only
+        # while navigation startup preflight is executing.
 
         self.mapping_pose_provider = MappingPoseProvider(
             self,
-            self.navigation_tf_buffer,
+            self.navigation_tf_lookup,
         )
 
         self.planning_path_service = (
@@ -345,12 +314,6 @@ class RobotBridgePublisher(Node):
             "/submap_list"
         )
 
-    def publish_navigation_tf(self, message):
-        filtered = filter_navigation_tf(message)
-
-        if filtered is not None:
-            self.navigation_tf_publisher.publish(filtered)
-
     def update_lidar(self, message):
         lidar_telemetry.update(message)
 
@@ -361,7 +324,7 @@ class RobotBridgePublisher(Node):
             )
             self.latest_scan_received_at = time.monotonic()
 
-    def update_local_odom(self, _message):
+    def update_local_odom(self, message):
         with self.navigation_preflight_lock:
             self.latest_local_odom_received_at = (
                 time.monotonic()
@@ -371,9 +334,6 @@ class RobotBridgePublisher(Node):
         checked_at = time.monotonic()
 
         with self.navigation_preflight_lock:
-            scan_stamp = self.latest_scan_stamp
-            scan_frame = self.latest_scan_frame
-            scan_received_at = self.latest_scan_received_at
             odom_received_at = (
                 self.latest_local_odom_received_at
             )
@@ -385,8 +345,12 @@ class RobotBridgePublisher(Node):
                 'No /odom/local message has been received.'
             )
             odom_age = None
+
         else:
-            odom_age = checked_at - odom_received_at
+            odom_age = (
+                checked_at
+                - odom_received_at
+            )
 
             if (
                 odom_age
@@ -397,45 +361,158 @@ class RobotBridgePublisher(Node):
                     f'({odom_age:.3f} seconds old).'
                 )
 
-        if (
-            scan_stamp is None
-            or scan_received_at is None
-            or not scan_frame
-        ):
-            failures.append(
-                'No usable /scan message has been received.'
-            )
-            scan_age = None
-        else:
-            scan_age = checked_at - scan_received_at
-
-            if (
-                scan_age
-                > NAVIGATION_PREFLIGHT_MAX_SENSOR_AGE_SECONDS
-            ):
-                failures.append(
-                    '/scan is stale '
-                    f'({scan_age:.3f} seconds old).'
-                )
+        scan_stamp = None
+        scan_frame = None
+        scan_received_at = None
+        scan_age = None
 
         if not failures:
-            try:
-                self.navigation_tf_buffer.lookup_transform(
-                    'odom',
-                    scan_frame,
-                    Time.from_msg(scan_stamp),
-                    timeout=Duration(
-                        seconds=(
-                            NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS
+            # A newly received LaserScan may carry a timestamp
+            # substantially older than its local receive time.
+            #
+            # Therefore "received after listener startup" alone
+            # is insufficient. Keep advancing through fresh
+            # scans until the temporary TF buffer can resolve
+            # one at its exact ROS timestamp.
+            with self.navigation_tf_lookup.session() as tf_lookup:
+                listener_started_at = time.monotonic()
+
+                capture_deadline = (
+                    listener_started_at
+                    + max(
+                        3.0,
+                        (
+                            2.0
+                            * NAVIGATION_PREFLIGHT_MAX_SENSOR_AGE_SECONDS
                         ),
-                    ),
+                    )
                 )
-            except TransformException as exc:
-                failures.append(
-                    'Exact scan-time transform '
-                    f'odom -> {scan_frame} is unavailable: '
-                    f'{exc}'
-                )
+
+                last_attempted_scan_received_at = None
+                last_tf_error = None
+                fresh_scan_seen = False
+
+                while (
+                    time.monotonic()
+                    < capture_deadline
+                ):
+                    with self.navigation_preflight_lock:
+                        candidate_stamp = (
+                            self.latest_scan_stamp
+                        )
+                        candidate_frame = (
+                            self.latest_scan_frame
+                        )
+                        candidate_received_at = (
+                            self.latest_scan_received_at
+                        )
+
+                    candidate_is_new = (
+                        candidate_stamp is not None
+                        and bool(candidate_frame)
+                        and candidate_received_at is not None
+                        and candidate_received_at
+                        > listener_started_at
+                        and (
+                            last_attempted_scan_received_at
+                            is None
+                            or candidate_received_at
+                            > last_attempted_scan_received_at
+                        )
+                    )
+
+                    if not candidate_is_new:
+                        time.sleep(0.01)
+                        continue
+
+                    fresh_scan_seen = True
+
+                    last_attempted_scan_received_at = (
+                        candidate_received_at
+                    )
+
+                    candidate_age = (
+                        time.monotonic()
+                        - candidate_received_at
+                    )
+
+                    if (
+                        candidate_age
+                        > NAVIGATION_PREFLIGHT_MAX_SENSOR_AGE_SECONDS
+                    ):
+                        time.sleep(0.01)
+                        continue
+
+                    try:
+                        transform = (
+                            tf_lookup.lookup_transform(
+                                'odom',
+                                candidate_frame,
+                                Time.from_msg(
+                                    candidate_stamp
+                                ),
+                                timeout=Duration(
+                                    seconds=(
+                                        NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS
+                                    ),
+                                ),
+                            )
+                        )
+
+                    except TransformException as exc:
+                        # Most early candidates will fail with
+                        # past extrapolation while the transient
+                        # buffer is still warming. That scan can
+                        # never become valid, so advance to the
+                        # next LaserScan instead of retrying it.
+                        last_tf_error = exc
+                        time.sleep(0.01)
+                        continue
+
+                    # Exact-time lookup succeeded. This is the
+                    # scan whose timestamp navigation startup
+                    # has actually validated.
+                    scan_stamp = candidate_stamp
+                    scan_frame = candidate_frame
+                    scan_received_at = (
+                        candidate_received_at
+                    )
+
+                    scan_age = (
+                        time.monotonic()
+                        - scan_received_at
+                    )
+
+                    # Keep an explicit reference until success
+                    # is established; lookup_transform() itself
+                    # is the validity check.
+                    _ = transform
+
+                    break
+
+                if scan_stamp is None:
+                    if not fresh_scan_seen:
+                        failures.append(
+                            'No fresh /scan message was received '
+                            'during transient TF capture.'
+                        )
+
+                    else:
+                        detail = ''
+
+                        if last_tf_error is not None:
+                            detail = (
+                                ' Last TF error: '
+                                + str(last_tf_error)
+                            )
+
+                        failures.append(
+                            'No fresh /scan message had an '
+                            'exact-time transform '
+                            'odom -> scan_frame within the '
+                            'transient TF capture window.'
+                            + detail
+                        )
 
         return {
             'ok': not failures,

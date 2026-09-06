@@ -321,45 +321,86 @@ def test_navigation_start_requires_exact_scan_time_tf_preflight():
     ]
 
     node = source[
-        source.index("class RobotBridgePublisher"):
-        source.index("def ros_spin():")
+        source.index(
+            "class RobotBridgePublisher"
+        ):
+        source.index(
+            "def ros_spin():"
+        )
     ]
 
     assert "'/odom/local'" in node
     assert "self.update_local_odom" in node
     assert "self.update_lidar" in node
-    assert "message.header.stamp" in node
-    assert "message.header.frame_id" in node
-    assert "Time.from_msg(scan_stamp)" in node
-    assert "lookup_transform(" in node
-    assert "'odom'," in node
-    assert (
-        "publisher_node.navigation_start_preflight()"
-        in control
-    )
-    assert (
-        control.index(
-            "publisher_node.navigation_start_preflight()"
-        )
-        < control.index(
-            "navigation_control.start(timestamp)"
-        )
-    )
-    assert "'preflight': preflight" in control
-    assert (
-        "NAVIGATION_PREFLIGHT_MAX_SENSOR_AGE_SECONDS"
-        in source
-    )
-    assert (
-        "NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS"
-        in source
-    )
-    assert (
-        "NAVIGATION_PREFLIGHT_TF_TIMEOUT_SECONDS = 1.00"
-        in source
-    )
-    assert "Time.from_msg(scan_stamp)" in node
 
+    assert (
+        "message.header.stamp"
+        in node
+    )
+
+    assert (
+        "message.header.frame_id"
+        in node
+    )
+
+    assert (
+        "self.navigation_tf_lookup.session()"
+        in node
+    )
+
+    assert (
+        "listener_started_at"
+        in node
+    )
+
+    assert (
+        "candidate_received_at"
+        in node
+    )
+
+    assert (
+        "tf_lookup.lookup_transform("
+        in node
+    )
+
+    assert (
+        "Time.from_msg("
+        in node
+    )
+
+    assert (
+        "scan_stamp"
+        in node
+    )
+
+    preflight = node[
+        node.index(
+            "    def navigation_start_preflight("
+        ):
+        node.index(
+            "    def initialize_planning_localization("
+        )
+    ]
+
+    lookup = preflight.index(
+        "tf_lookup.lookup_transform("
+    )
+
+    accepted = preflight.index(
+        "scan_stamp = candidate_stamp"
+    )
+
+    assert lookup < accepted
+
+    preflight_call = control.index(
+        "publisher_node.navigation_start_preflight()"
+    )
+
+    runtime_start = control.index(
+        "navigation_control.start(timestamp)"
+    )
+
+    assert preflight_call < runtime_start
 
 def test_other_modes_block_navigation_overlap():
     source = Path("app.py").read_text(
@@ -411,44 +452,78 @@ def test_global_shutdown_registers_navigation_cleanup():
     )
 
 
-def test_robot_bridge_processes_tf_without_telemetry_backlog():
+
+def test_robot_bridge_uses_transient_tf_for_preflight():
     source = Path("app.py").read_text(
         encoding="utf-8"
     )
 
-    assert (
-        "from rclpy.executors import MultiThreadedExecutor"
-        in source
-    )
-    assert "SingleThreadedExecutor" not in source
-    assert "executor = MultiThreadedExecutor(" in source
-    assert "num_threads=2" in source
+    node = source[
+        source.index(
+            "class RobotBridgePublisher"
+        ):
+        source.index(
+            "def ros_spin():"
+        )
+    ]
 
-    tf_start = source.index(
-        "        self.navigation_tf_buffer = Buffer()"
-    )
-    tf_end = source.index(
-        "        self.planning_path_service =",
-        tf_start,
-    )
-    tf_listener = source[tf_start:tf_end]
-
-    assert "navigation_tf_qos = QoSProfile(" in tf_listener
-    assert "history=HistoryPolicy.KEEP_LAST" in tf_listener
-    assert "depth=1" in tf_listener
+    # The always-on history-buffer implementation is gone.
     assert (
-        "reliability=ReliabilityPolicy.BEST_EFFORT"
-        in tf_listener
+        "self.navigation_preflight_tf"
+        not in node
     )
-    assert (
-        "durability=DurabilityPolicy.VOLATILE"
-        in tf_listener
-    )
-    assert "spin_thread=False" in tf_listener
-    assert "qos=navigation_tf_qos" in tf_listener
 
-    assert "Time.from_msg(scan_stamp)" in source
-    assert "lookup_transform(" in source
+    assert (
+        "NavigationTfHistoryBuffer"
+        not in node
+    )
+
+    assert (
+        "self.navigation_tf_history"
+        not in node
+    )
+
+    # No full TF consumption during normal Bridge operation.
+    assert '"/tf",' not in node
+    assert "'/tf'," not in node
+
+    assert '"/tf_static",' not in node
+    assert "'/tf_static'," not in node
+
+    assert '"/odom",' not in node
+    assert "'/odom'," not in node
+
+    # Existing low-load telemetry remains.
+    assert "'/odom/local'," in node
+    assert "'/scan'," in node
+
+    # Exact-time TF is created only on demand.
+    assert (
+        "self.navigation_tf_lookup = "
+        "TransientTfLookup()"
+        in node
+    )
+
+    assert (
+        "with self.navigation_tf_lookup.session() "
+        "as tf_lookup:"
+        in node
+    )
+
+    assert (
+        "tf_lookup.lookup_transform("
+        in node
+    )
+
+    assert (
+        "Time.from_msg("
+        in node
+    )
+
+    assert (
+        "scan_stamp"
+        in node
+    )
 
 def test_navigation_goal_refreshes_pose_atomically():
     source = open(
