@@ -3,40 +3,40 @@
 import threading
 import time
 
-import cv2
 import rclpy
-from cv_bridge import CvBridge
 from flask import Flask, Response, jsonify
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 
 
 HOST = "0.0.0.0"
 PORT = 8091
-IMAGE_TOPIC = "/image_raw"
-JPEG_QUALITY = 80
+IMAGE_TOPIC = "/image_raw/compressed"
 FRAME_TIMEOUT_SECONDS = 3.0
 
 
 app = Flask(__name__)
 
 lock = threading.Lock()
+
 latest_jpeg = None
 latest_timestamp = None
 latest_frame_monotonic = None
+
 ros_ready = False
 
 
 class CameraRelayNode(Node):
-    def __init__(self):
-        super().__init__("camera_http_relay")
 
-        self.bridge = CvBridge()
+    def __init__(self):
+        super().__init__(
+            "camera_http_relay"
+        )
 
         self.subscription = self.create_subscription(
-            Image,
+            CompressedImage,
             IMAGE_TOPIC,
             self.image_callback,
             qos_profile_sensor_data,
@@ -52,20 +52,13 @@ class CameraRelayNode(Node):
         global latest_frame_monotonic
 
         try:
-            frame = self.bridge.imgmsg_to_cv2(
-                message,
-                desired_encoding="bgr8",
+            jpeg = bytes(
+                message.data
             )
 
-            ok, encoded = cv2.imencode(
-                ".jpg",
-                frame,
-                [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY],
-            )
-
-            if not ok:
+            if not jpeg:
                 self.get_logger().warning(
-                    "Could not encode camera frame as JPEG."
+                    "Received empty compressed camera frame."
                 )
                 return
 
@@ -74,10 +67,12 @@ class CameraRelayNode(Node):
                 f"{message.header.stamp.nanosec:09d}"
             )
 
+            now = time.monotonic()
+
             with lock:
-                latest_jpeg = encoded.tobytes()
+                latest_jpeg = jpeg
                 latest_timestamp = timestamp
-                latest_frame_monotonic = time.monotonic()
+                latest_frame_monotonic = now
 
         except Exception as exc:
             self.get_logger().error(
@@ -91,6 +86,7 @@ def ros_spin():
     rclpy.init(args=None)
 
     node = CameraRelayNode()
+
     executor = SingleThreadedExecutor()
     executor.add_node(node)
 
@@ -98,8 +94,10 @@ def ros_spin():
 
     try:
         executor.spin()
+
     finally:
         ros_ready = False
+
         executor.shutdown()
         node.destroy_node()
 
@@ -125,10 +123,14 @@ def root():
     return jsonify(
         {
             "ok": True,
-            "service": "mini_pupper_camera_relay",
-            "image_topic": IMAGE_TOPIC,
-            "camera_running": camera_is_running(),
-            "ros_ready": ros_ready,
+            "service":
+                "mini_pupper_camera_relay",
+            "image_topic":
+                IMAGE_TOPIC,
+            "camera_running":
+                camera_is_running(),
+            "ros_ready":
+                ros_ready,
             "endpoints": [
                 "/status",
                 "/camera/latest.jpg",
@@ -141,17 +143,25 @@ def root():
 def status():
     with lock:
         timestamp = latest_timestamp
-        has_frame = latest_jpeg is not None
+        has_frame = (
+            latest_jpeg is not None
+        )
 
     return jsonify(
         {
             "ok": True,
-            "service": "mini_pupper_camera_relay",
-            "image_topic": IMAGE_TOPIC,
-            "camera_running": camera_is_running(),
-            "ros_ready": ros_ready,
-            "has_frame": has_frame,
-            "latest_timestamp": timestamp,
+            "service":
+                "mini_pupper_camera_relay",
+            "image_topic":
+                IMAGE_TOPIC,
+            "camera_running":
+                camera_is_running(),
+            "ros_ready":
+                ros_ready,
+            "has_frame":
+                has_frame,
+            "latest_timestamp":
+                timestamp,
         }
     )
 
@@ -165,8 +175,10 @@ def latest_camera_frame():
         return jsonify(
             {
                 "ok": False,
-                "error": "No camera frame received yet.",
-                "camera_running": False,
+                "error":
+                    "No camera frame received yet.",
+                "camera_running":
+                    False,
             }
         ), 503
 
@@ -174,7 +186,9 @@ def latest_camera_frame():
         jpeg,
         mimetype="image/jpeg",
         headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Cache-Control":
+                "no-store, no-cache, "
+                "must-revalidate",
         },
     )
 
@@ -185,6 +199,7 @@ def main():
         daemon=True,
         name="camera-relay-ros",
     )
+
     ros_thread.start()
 
     app.run(
