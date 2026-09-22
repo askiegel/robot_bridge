@@ -2336,6 +2336,301 @@ def mapping_navigation_stop():
     )
 
 
+
+STANFORD_LOCOMOTION_UNIT = (
+    "mayday-stanford-locomotion.service"
+)
+
+STANFORD_OWNERSHIP_READY_STATUS = (
+    "Stanford ownership ACTIVE"
+)
+
+STANFORD_OWNERSHIP_START_TIMEOUT_SECONDS = 50.0
+STANFORD_OWNERSHIP_STOP_TIMEOUT_SECONDS = 20.0
+
+
+def stanford_ownership_status():
+    import subprocess
+
+    command = [
+        "systemctl",
+        "show",
+        STANFORD_LOCOMOTION_UNIT,
+        "-p",
+        "ActiveState",
+        "-p",
+        "SubState",
+        "-p",
+        "StatusText",
+        "-p",
+        "Result",
+        "-p",
+        "ExecMainStatus",
+    ]
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "ready": False,
+            "error": str(exc),
+        }
+
+    fields = {}
+
+    for line in completed.stdout.splitlines():
+
+        if "=" not in line:
+            continue
+
+        key, value = line.split(
+            "=",
+            1,
+        )
+
+        fields[key] = value
+
+    active_state = fields.get(
+        "ActiveState"
+    )
+
+    sub_state = fields.get(
+        "SubState"
+    )
+
+    status_text = fields.get(
+        "StatusText"
+    )
+
+    ready = (
+        completed.returncode == 0
+        and active_state == "active"
+        and sub_state == "running"
+        and status_text
+        == STANFORD_OWNERSHIP_READY_STATUS
+    )
+
+    return {
+        "ok": completed.returncode == 0,
+        "ready": ready,
+        "active_state": active_state,
+        "sub_state": sub_state,
+        "status_text": status_text,
+        "result": fields.get(
+            "Result"
+        ),
+        "exec_main_status": fields.get(
+            "ExecMainStatus"
+        ),
+        "stderr": completed.stderr.strip(),
+    }
+
+
+def _run_stanford_systemctl(
+    action,
+    timeout_seconds,
+):
+    import subprocess
+
+    command = [
+        "sudo",
+        "-n",
+        "systemctl",
+        action,
+        STANFORD_LOCOMOTION_UNIT,
+    ]
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+
+        return {
+            "ok": completed.returncode == 0,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout.strip(),
+            "stderr": completed.stderr.strip(),
+        }
+
+    except subprocess.TimeoutExpired as exc:
+
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": (
+                exc.stdout.decode()
+                if isinstance(
+                    exc.stdout,
+                    bytes,
+                )
+                else (
+                    exc.stdout
+                    or ""
+                )
+            ),
+            "stderr": (
+                exc.stderr.decode()
+                if isinstance(
+                    exc.stderr,
+                    bytes,
+                )
+                else (
+                    exc.stderr
+                    or ""
+                )
+            ),
+            "error": (
+                f"systemctl {action} timed out."
+            ),
+        }
+
+    except Exception as exc:
+
+        return {
+            "ok": False,
+            "returncode": None,
+            "error": str(exc),
+        }
+
+
+def release_stanford_ownership():
+    before = stanford_ownership_status()
+
+    if (
+        before.get("ok")
+        and before.get("active_state")
+        == "inactive"
+    ):
+        return {
+            "ok": True,
+            "stopped": False,
+            "already_stopped": True,
+            "before": before,
+            "after": before,
+        }
+
+    command_result = (
+        _run_stanford_systemctl(
+            "stop",
+            STANFORD_OWNERSHIP_STOP_TIMEOUT_SECONDS,
+        )
+    )
+
+    after = stanford_ownership_status()
+
+    ok = (
+        command_result.get("ok") is True
+        and after.get("ok") is True
+        and after.get("active_state")
+        == "inactive"
+    )
+
+    return {
+        "ok": ok,
+        "stopped": ok,
+        "already_stopped": False,
+        "command": command_result,
+        "before": before,
+        "after": after,
+        "error": (
+            None
+            if ok
+            else (
+                "Stanford locomotion ownership "
+                "did not stop cleanly."
+            )
+        ),
+    }
+
+
+def acquire_stanford_ownership():
+    before = stanford_ownership_status()
+
+    #
+    # Reuse a healthy ownership session across
+    # multiple bounded navigation goals.
+    #
+    if before.get("ready") is True:
+
+        return {
+            "ok": True,
+            "started": False,
+            "reused": True,
+            "before": before,
+            "after": before,
+        }
+
+    active_state = before.get(
+        "active_state"
+    )
+
+    if active_state not in (
+        "inactive",
+        "failed",
+    ):
+
+        return {
+            "ok": False,
+            "started": False,
+            "reused": False,
+            "before": before,
+            "error": (
+                "Stanford ownership is in an "
+                f"unexpected state: {active_state}"
+            ),
+        }
+
+    command_result = (
+        _run_stanford_systemctl(
+            "start",
+            STANFORD_OWNERSHIP_START_TIMEOUT_SECONDS,
+        )
+    )
+
+    after = stanford_ownership_status()
+
+    if (
+        command_result.get("ok") is True
+        and after.get("ready") is True
+    ):
+
+        return {
+            "ok": True,
+            "started": True,
+            "reused": False,
+            "command": command_result,
+            "before": before,
+            "after": after,
+        }
+
+    cleanup = release_stanford_ownership()
+
+    return {
+        "ok": False,
+        "started": False,
+        "reused": False,
+        "command": command_result,
+        "before": before,
+        "after": after,
+        "cleanup": cleanup,
+        "error": (
+            "Stanford locomotion ownership "
+            "did not reach ACTIVE readiness."
+        ),
+    }
+
+
 @app.route("/navigation/status", methods=["GET"])
 def navigation_control_status():
     return jsonify({
@@ -2748,81 +3043,116 @@ def navigation_goal():
 
     payload = request.get_json(silent=True)
 
+    ownership = acquire_stanford_ownership()
+
+    if not ownership.get('ok'):
+
+        final_stop_result = stop_robot()
+
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': (
+                ownership.get('error')
+                or (
+                    'Stanford locomotion ownership '
+                    'could not be acquired.'
+                )
+            ),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'stanford_ownership': ownership,
+            'navigation': (
+                navigation_control.snapshot()
+            ),
+        }), 503
+
+    result = None
+    goal_error = None
+    goal_status_code = None
+
     try:
         result = (
             publisher_node
             .execute_navigation_goal(payload)
         )
+
     except NavigationGoalValidationError as exc:
-        final_stop_result = stop_robot()
-        return jsonify({
-            'ok': False,
-            'action': 'navigation_goal',
-            'timestamp': timestamp,
-            'error': str(exc),
-            'initial_stop_result': initial_stop_result,
-            'final_stop_result': final_stop_result,
-            'navigation': navigation_control.snapshot(),
-        }), 400
+        goal_error = str(exc)
+        goal_status_code = 400
+
     except NavigationGoalConflictError as exc:
-        final_stop_result = stop_robot()
-        return jsonify({
-            'ok': False,
-            'action': 'navigation_goal',
-            'timestamp': timestamp,
-            'error': str(exc),
-            'initial_stop_result': initial_stop_result,
-            'final_stop_result': final_stop_result,
-            'navigation': navigation_control.snapshot(),
-        }), 409
+        goal_error = str(exc)
+        goal_status_code = 409
+
     except NavigationGoalCancelledError as exc:
-        final_stop_result = stop_robot()
-        return jsonify({
-            'ok': False,
-            'action': 'navigation_goal',
-            'timestamp': timestamp,
-            'error': str(exc),
-            'initial_stop_result': initial_stop_result,
-            'final_stop_result': final_stop_result,
-            'navigation': navigation_control.snapshot(),
-        }), 409
+        goal_error = str(exc)
+        goal_status_code = 409
+
     except NavigationGoalTimeoutError as exc:
-        final_stop_result = stop_robot()
-        return jsonify({
-            'ok': False,
-            'action': 'navigation_goal',
-            'timestamp': timestamp,
-            'error': str(exc),
-            'initial_stop_result': initial_stop_result,
-            'final_stop_result': final_stop_result,
-            'navigation': navigation_control.snapshot(),
-        }), 504
+        goal_error = str(exc)
+        goal_status_code = 504
+
     except NavigationGoalUnavailableError as exc:
-        final_stop_result = stop_robot()
-        return jsonify({
-            'ok': False,
-            'action': 'navigation_goal',
-            'timestamp': timestamp,
-            'error': str(exc),
-            'initial_stop_result': initial_stop_result,
-            'final_stop_result': final_stop_result,
-            'navigation': navigation_control.snapshot(),
-        }), 503
+        goal_error = str(exc)
+        goal_status_code = 503
+
     except NavigationGoalError as exc:
-        final_stop_result = stop_robot()
-        return jsonify({
-            'ok': False,
-            'action': 'navigation_goal',
-            'timestamp': timestamp,
-            'error': str(exc),
-            'initial_stop_result': initial_stop_result,
-            'final_stop_result': final_stop_result,
-            'navigation': navigation_control.snapshot(),
-        }), 503
+        goal_error = str(exc)
+        goal_status_code = 503
+
+    except Exception as exc:
+        goal_error = (
+            'Unexpected navigation goal failure: '
+            f'{exc}'
+        )
+        goal_status_code = 503
 
     final_stop_result = stop_robot()
 
+    #
+    # Failed goals return Mayday to normal CHAMP
+    # ownership. Successful goals retain Stanford so
+    # subsequent waypoints do not pay the ownership
+    # startup delay again.
+    #
+    if goal_error is not None:
+
+        ownership_release = (
+            release_stanford_ownership()
+        )
+
+        response_code = goal_status_code
+
+        if (
+            not final_stop_result.get('ok')
+            or not ownership_release.get('ok')
+        ):
+            response_code = 503
+
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': goal_error,
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'stanford_ownership': ownership,
+            'stanford_ownership_release': (
+                ownership_release
+            ),
+            'navigation': (
+                navigation_control.snapshot()
+            ),
+        }), response_code
+
     if not final_stop_result.get('ok'):
+
+        ownership_release = (
+            release_stanford_ownership()
+        )
+
         return jsonify({
             'ok': False,
             'action': 'navigation_goal',
@@ -2833,7 +3163,46 @@ def navigation_goal():
             ),
             'initial_stop_result': initial_stop_result,
             'final_stop_result': final_stop_result,
-            'navigation': navigation_control.snapshot(),
+            'stanford_ownership': ownership,
+            'stanford_ownership_release': (
+                ownership_release
+            ),
+            'navigation': (
+                navigation_control.snapshot()
+            ),
+            'result': result,
+        }), 503
+
+    ownership_after = (
+        stanford_ownership_status()
+    )
+
+    if not ownership_after.get('ready'):
+
+        ownership_release = (
+            release_stanford_ownership()
+        )
+
+        return jsonify({
+            'ok': False,
+            'action': 'navigation_goal',
+            'timestamp': timestamp,
+            'error': (
+                'Navigation completed but Stanford '
+                'ownership is no longer ready.'
+            ),
+            'initial_stop_result': initial_stop_result,
+            'final_stop_result': final_stop_result,
+            'stanford_ownership': ownership,
+            'stanford_ownership_after': (
+                ownership_after
+            ),
+            'stanford_ownership_release': (
+                ownership_release
+            ),
+            'navigation': (
+                navigation_control.snapshot()
+            ),
             'result': result,
         }), 503
 
@@ -2843,10 +3212,14 @@ def navigation_goal():
         'timestamp': timestamp,
         'message': (
             'One bounded guarded navigation goal '
-            'completed.'
+            'completed with Stanford locomotion.'
         ),
         'initial_stop_result': initial_stop_result,
         'final_stop_result': final_stop_result,
+        'stanford_ownership': ownership,
+        'stanford_ownership_after': (
+            ownership_after
+        ),
         'navigation': navigation_control.snapshot(),
         'result': result,
     }), 200
@@ -2858,38 +3231,64 @@ def navigation_stop():
     stop_result = stop_robot()
     timestamp = now_iso()
 
+    #
+    # Release Stanford only after goal cancellation
+    # and a Robot Bridge safety zero.
+    #
+    ownership_release = (
+        release_stanford_ownership()
+    )
+
     try:
         result = navigation_control.stop(timestamp)
+
     except NavigationControlError as exc:
         return jsonify({
             'ok': False,
             'action': 'navigation_stop',
             'timestamp': timestamp,
             'error': str(exc),
+            'cancel_result': cancel_result,
             'stop_result': stop_result,
-            'navigation': navigation_control.snapshot(),
+            'stanford_ownership_release': (
+                ownership_release
+            ),
+            'navigation': (
+                navigation_control.snapshot()
+            ),
         }), 503
 
     localization_telemetry.clear()
 
+    ok = (
+        bool(stop_result.get('ok'))
+        and ownership_release.get('ok') is True
+    )
+
     return jsonify({
-        'ok': bool(stop_result.get('ok')),
+        'ok': ok,
         'action': 'navigation_stop',
         'timestamp': timestamp,
         'message': (
-            'Guarded navigation runtime stopped.'
+            'Guarded navigation runtime stopped '
+            'and Stanford locomotion ownership '
+            'was released.'
             if result.get('stopped')
             else (
                 'Guarded navigation runtime was '
-                'already stopped.'
+                'already stopped; Stanford '
+                'ownership is released.'
             )
         ),
         'cancel_result': cancel_result,
         'stop_result': stop_result,
+        'stanford_ownership_release': (
+            ownership_release
+        ),
         'navigation': result,
     }), (
         200
-        if stop_result.get('ok')
+        if ok
         else 503
     )
 
