@@ -317,7 +317,6 @@ class PlanningControl:
             expected[normalized_name] = digest
 
         required = (
-            'mayday_supervised_route_03.pbstream',
             'mayday_supervised_route_03.yaml',
             'mayday_supervised_route_03.pgm',
         )
