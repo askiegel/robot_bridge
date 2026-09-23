@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import atexit
+import json
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 import rclpy
@@ -135,6 +137,24 @@ motion_state = {
     "watchdog_stop_count": 0,
 }
 
+MOTION_AUDIT_MAX_RECORDS = 100
+
+# The audit lock never nests with motion_lock or publisher_lock.  Egress
+# records only after the ROS publisher accepts a Twist, and HTTP reads only
+# copy this bounded state.
+motion_audit_lock = threading.Lock()
+motion_audit = {
+    "next_sequence": 1,
+    "next_segment_id": 1,
+    "active_segment": None,
+    "recent_segments": deque(
+        maxlen=MOTION_AUDIT_MAX_RECORDS,
+    ),
+    "recent_zero_events": deque(
+        maxlen=MOTION_AUDIT_MAX_RECORDS,
+    ),
+}
+
 speech_service = SpeechService()
 lidar_telemetry = LidarTelemetry()
 live_mapping_telemetry = LiveMappingTelemetry()
@@ -199,6 +219,166 @@ atexit.register(mapping_navigation_control.shutdown)
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _complete_motion_audit_segment(
+    segment,
+    timestamp,
+    monotonic_time,
+    sequence,
+):
+    segment["end_timestamp"] = timestamp
+    segment["end_monotonic"] = monotonic_time
+    segment["elapsed_duration"] = max(
+        0.0,
+        monotonic_time - segment["start_monotonic"],
+    )
+    segment["end_sequence"] = sequence
+    segment["state"] = "completed"
+    motion_audit["recent_segments"].append(segment)
+
+    print(
+        "MOTION_AUDIT "
+        + json.dumps(
+            {
+                "event": "segment_end",
+                "segment_id": segment["segment_id"],
+                "sequence": sequence,
+                "elapsed_duration": (
+                    segment["elapsed_duration"]
+                ),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
+def record_motion_egress(linear_x, angular_z):
+    """Record a Twist only after the final ROS publisher accepts it."""
+    linear_x = float(linear_x)
+    angular_z = float(angular_z)
+    timestamp = now_iso()
+    monotonic_time = time.monotonic()
+    is_zero = linear_x == 0.0 and angular_z == 0.0
+
+    with motion_audit_lock:
+        sequence = motion_audit["next_sequence"]
+        motion_audit["next_sequence"] += 1
+        active_segment = motion_audit["active_segment"]
+
+        if is_zero:
+            previous_segment_id = None
+
+            if active_segment is not None:
+                previous_segment_id = active_segment[
+                    "segment_id"
+                ]
+                _complete_motion_audit_segment(
+                    active_segment,
+                    timestamp,
+                    monotonic_time,
+                    sequence,
+                )
+                motion_audit["active_segment"] = None
+
+            zero_event = {
+                "sequence": sequence,
+                "timestamp": timestamp,
+                "monotonic_time": monotonic_time,
+                "event_type": "zero_egress",
+                "previous_active_segment_id": (
+                    previous_segment_id
+                ),
+                "linear_x": linear_x,
+                "angular_z": angular_z,
+                "source": None,
+            }
+            motion_audit["recent_zero_events"].append(
+                zero_event
+            )
+
+            print(
+                "MOTION_AUDIT "
+                + json.dumps(zero_event, sort_keys=True),
+                flush=True,
+            )
+            return
+
+        if (
+            active_segment is not None
+            and active_segment["linear_x"] == linear_x
+            and active_segment["angular_z"] == angular_z
+        ):
+            active_segment["publish_count"] += 1
+            active_segment["last_publish_sequence"] = sequence
+            return
+
+        if active_segment is not None:
+            _complete_motion_audit_segment(
+                active_segment,
+                timestamp,
+                monotonic_time,
+                sequence,
+            )
+
+        segment = {
+            "audit_sequence": sequence,
+            "segment_id": motion_audit["next_segment_id"],
+            "start_timestamp": timestamp,
+            "start_monotonic": monotonic_time,
+            "end_timestamp": None,
+            "end_monotonic": None,
+            "elapsed_duration": None,
+            "linear_x": linear_x,
+            "angular_z": angular_z,
+            "publish_count": 1,
+            "state": "active",
+            "last_publish_sequence": sequence,
+            "end_sequence": None,
+            "source": None,
+        }
+        motion_audit["next_segment_id"] += 1
+        motion_audit["active_segment"] = segment
+
+        print(
+            "MOTION_AUDIT "
+            + json.dumps(
+                {
+                    "event": "segment_start",
+                    "segment_id": segment["segment_id"],
+                    "sequence": sequence,
+                    "linear_x": linear_x,
+                    "angular_z": angular_z,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+
+def motion_audit_snapshot():
+    with motion_audit_lock:
+        active_segment = motion_audit["active_segment"]
+
+        return {
+            "next_sequence": motion_audit["next_sequence"],
+            "active_segment": (
+                dict(active_segment)
+                if active_segment is not None
+                else None
+            ),
+            "recent_segments": [
+                dict(segment)
+                for segment in motion_audit["recent_segments"]
+            ],
+            "recent_zero_events": [
+                dict(event)
+                for event in motion_audit[
+                    "recent_zero_events"
+                ]
+            ],
+        }
 
 
 class RobotBridgePublisher(Node):
@@ -596,6 +776,10 @@ class RobotBridgePublisher(Node):
         message.angular.z = float(angular_z)
 
         self.publisher.publish(message)
+        record_motion_egress(
+            message.linear.x,
+            message.angular.z,
+        )
 
 
 def ros_spin():
@@ -761,72 +945,60 @@ def set_streaming_motion(
     }
 
 
+def streaming_motion_step():
+    should_publish_motion = False
+    should_publish_stop = False
+    linear_x = 0.0
+    angular_z = 0.0
+
+    with motion_lock:
+        if motion_state["streaming"]:
+            deadline = motion_state[
+                "deadline_monotonic"
+            ]
+
+            if (
+                deadline is not None
+                and time.monotonic() >= deadline
+            ):
+                motion_state["streaming"] = False
+                motion_state["linear_x"] = 0.0
+                motion_state["angular_z"] = 0.0
+                motion_state["deadline_monotonic"] = None
+                motion_state["last_stop_at"] = now_iso()
+                motion_state["watchdog_stop_count"] += 1
+
+                should_publish_stop = True
+
+            else:
+                linear_x = motion_state["linear_x"]
+                angular_z = motion_state["angular_z"]
+                should_publish_motion = True
+
+    if should_publish_motion:
+        return publish_twist(linear_x, angular_z)
+
+    if should_publish_stop:
+        result = publish_twist(0.0, 0.0)
+
+        print(
+            "Robot Bridge streaming watchdog "
+            "published automatic stop.",
+            flush=True,
+        )
+
+        return result
+
+    return None
+
+
 def streaming_motion_loop():
     interval = 1.0 / STREAM_PUBLISH_HZ
 
     while True:
         started = time.monotonic()
 
-        should_publish_motion = False
-        should_publish_stop = False
-        linear_x = 0.0
-        angular_z = 0.0
-
-        with motion_lock:
-            if motion_state["streaming"]:
-                deadline = motion_state[
-                    "deadline_monotonic"
-                ]
-
-                if (
-                    deadline is not None
-                    and time.monotonic() >= deadline
-                ):
-                    motion_state[
-                        "streaming"
-                    ] = False
-                    motion_state[
-                        "linear_x"
-                    ] = 0.0
-                    motion_state[
-                        "angular_z"
-                    ] = 0.0
-                    motion_state[
-                        "deadline_monotonic"
-                    ] = None
-                    motion_state[
-                        "last_stop_at"
-                    ] = now_iso()
-                    motion_state[
-                        "watchdog_stop_count"
-                    ] += 1
-
-                    should_publish_stop = True
-
-                else:
-                    linear_x = motion_state[
-                        "linear_x"
-                    ]
-                    angular_z = motion_state[
-                        "angular_z"
-                    ]
-
-                    should_publish_motion = True
-
-        if should_publish_motion:
-            publish_twist(
-                linear_x,
-                angular_z,
-            )
-
-        elif should_publish_stop:
-            publish_twist(0.0, 0.0)
-
-            print(
-                "Robot Bridge streaming watchdog "
-                "published automatic stop.",
-                flush=True,
-            )
+        streaming_motion_step()
 
         elapsed = time.monotonic() - started
         remaining = interval - elapsed
@@ -1312,6 +1484,16 @@ def localization_status():
     response.headers['Access-Control-Allow-Origin'] = '*'
 
     return response, 200 if available else 503
+
+
+@app.route("/motion/audit", methods=["GET"])
+def motion_audit_status():
+    return jsonify(
+        {
+            "ok": True,
+            "motion_audit": motion_audit_snapshot(),
+        }
+    )
 
 
 @app.route("/motion", methods=["POST"])
