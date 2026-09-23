@@ -27,6 +27,7 @@ from sensor_msgs.msg import LaserScan
 from tf2_ros import TransformException
 from tf2_msgs.msg import TFMessage
 
+from transient_tf_lookup import TransientOdometryTfLookup
 from transient_tf_lookup import TransientTfLookup
 
 from candidate_map_telemetry import (
@@ -401,6 +402,9 @@ class RobotBridgePublisher(Node):
         # so it uses a short-lived TF listener only when
         # explicitly requested.
         self.navigation_tf_lookup = TransientTfLookup()
+        self.navigation_preflight_tf_lookup = (
+            TransientOdometryTfLookup()
+        )
 
         # Navigation TF is intentionally demand-driven.
         #
@@ -552,9 +556,12 @@ class RobotBridgePublisher(Node):
             #
             # Therefore "received after listener startup" alone
             # is insufficient. Keep advancing through fresh
-            # scans until the temporary TF buffer can resolve
-            # one at its exact ROS timestamp.
-            with self.navigation_tf_lookup.session() as tf_lookup:
+            # scans until the temporary odometry/static-TF buffer
+            # can resolve one at its exact ROS timestamp.
+            with (
+                self.navigation_preflight_tf_lookup.session()
+                as tf_lookup
+            ):
                 listener_started_at = time.monotonic()
 
                 capture_deadline = (
@@ -576,6 +583,14 @@ class RobotBridgePublisher(Node):
                     time.monotonic()
                     < capture_deadline
                 ):
+                    odometry_error = (
+                        tf_lookup.validation_error()
+                    )
+
+                    if odometry_error is not None:
+                        failures.append(odometry_error)
+                        break
+
                     with self.navigation_preflight_lock:
                         candidate_stamp = (
                             self.latest_scan_stamp

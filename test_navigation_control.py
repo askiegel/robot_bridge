@@ -344,7 +344,7 @@ def test_navigation_start_requires_exact_scan_time_tf_preflight():
     )
 
     assert (
-        "self.navigation_tf_lookup.session()"
+        "self.navigation_preflight_tf_lookup.session()"
         in node
     )
 
@@ -469,11 +469,6 @@ def test_robot_bridge_uses_transient_tf_for_preflight():
 
     # The always-on history-buffer implementation is gone.
     assert (
-        "self.navigation_preflight_tf"
-        not in node
-    )
-
-    assert (
         "NavigationTfHistoryBuffer"
         not in node
     )
@@ -504,9 +499,9 @@ def test_robot_bridge_uses_transient_tf_for_preflight():
         in node
     )
 
+    assert "TransientOdometryTfLookup" in node
     assert (
-        "with self.navigation_tf_lookup.session() "
-        "as tf_lookup:"
+        "self.navigation_preflight_tf_lookup.session()"
         in node
     )
 
@@ -564,4 +559,3 @@ def test_navigation_goal_refreshes_pose_atomically():
     assert "reinitialize_global_localization" not in method
     assert "NavigateToPose" not in method
     assert "cmd_vel" not in method
-

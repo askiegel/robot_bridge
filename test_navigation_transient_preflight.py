@@ -39,8 +39,7 @@ def test_no_continuous_navigation_tf_objects():
     text = node_source()
 
     for symbol in (
-        "navigation_preflight_tf",
-        "navigation_tf_history",
+            "navigation_tf_history",
         "navigation_tf_publisher",
         "navigation_tf_publish_timer",
         "navigation_odom_subscription",
@@ -60,8 +59,7 @@ def test_transient_listener_is_started_before_candidate_scans():
     text = preflight_source()
 
     session = text.index(
-        "with self.navigation_tf_lookup.session() "
-        "as tf_lookup:"
+        "self.navigation_preflight_tf_lookup.session()"
     )
 
     listener = text.index(
@@ -185,3 +183,28 @@ def test_preflight_reports_no_exact_time_candidate():
         "'transient TF capture window.'"
         in text
     )
+
+
+def test_preflight_uses_transient_odometry_static_tf_session():
+    text = node_source()
+    preflight = preflight_source()
+
+    assert "TransientOdometryTfLookup" in text
+    assert "self.navigation_preflight_tf_lookup" in text
+    assert "self.navigation_tf_lookup.session()" not in preflight
+    assert "self.navigation_preflight_tf_lookup.session()" in preflight
+
+
+def test_preflight_rejects_malformed_odometry_before_navigation_start():
+    text = preflight_source()
+
+    assert "tf_lookup.validation_error()" in text
+    assert "failures.append(odometry_error)" in text
+
+
+def test_preflight_has_no_latest_time_lookup_fallback():
+    text = preflight_source()
+
+    assert "Time.from_msg(" in text
+    assert "candidate_stamp" in text
+    assert "Time()" not in text

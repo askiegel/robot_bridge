@@ -54,8 +54,8 @@ def test_navigation_tf_relay_is_not_permanent():
     )
 
     assert (
-        "navigation_preflight_tf"
-        not in source
+        "navigation_preflight_tf_lookup"
+        in source
     )
 
 
@@ -80,8 +80,7 @@ def test_preflight_starts_tf_before_selecting_fresh_scan():
     source = preflight_source()
 
     session = source.index(
-        "with self.navigation_tf_lookup.session() "
-        "as tf_lookup:"
+        "self.navigation_preflight_tf_lookup.session()"
     )
 
     listener_time = source.index(
