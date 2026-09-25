@@ -131,6 +131,7 @@ publisher_lock = threading.Lock()
 motion_lock = threading.RLock()
 local_motion_lock = threading.Lock()
 local_motion_active = False
+local_motion_cancel_event = threading.Event()
 motion_state = {
     "streaming": False,
     "linear_x": 0.0,
@@ -1160,6 +1161,7 @@ def local_motion_forward():
         return jsonify({"ok": False, "action": "local_forward",
                         "executed": False, "stop_reason": "local_motion_active"}), 409
 
+    local_motion_cancel_event.clear()
     local_motion_active = True
     started = time.monotonic()
     gate = forward_clearance(lidar_telemetry.snapshot())
@@ -1173,7 +1175,9 @@ def local_motion_forward():
     response_status = 200
     acquired = False
     try:
-        if not ros_ready or publisher_node is None:
+        if local_motion_cancel_event.is_set():
+            stop_reason = "local_motion_cancelled"
+        elif not ros_ready or publisher_node is None:
             stop_reason = "ros_not_ready"
             response_status = 503
         elif _local_motion_conflict():
@@ -1188,13 +1192,19 @@ def local_motion_forward():
                 response_status = 503
             else:
                 ownership = acquire_stanford_ownership()
-                if not ownership.get("ok"):
+                if local_motion_cancel_event.is_set() and ownership.get("ok"):
+                    acquired = True
+                    stop_reason = "local_motion_cancelled"
+                elif not ownership.get("ok"):
                     stop_reason = "stanford_ownership_unavailable"
                     response_status = 503
                 else:
                     acquired = True
                     motion_started = time.monotonic()
                     while time.monotonic() - motion_started < MAX_DURATION_SECONDS:
+                        if local_motion_cancel_event.is_set():
+                            stop_reason = "local_motion_cancelled"
+                            break
                         gate = forward_clearance(lidar_telemetry.snapshot())
                         if not continue_allowed(gate):
                             stop_reason = _local_motion_stop_reason(gate)
@@ -4305,6 +4315,7 @@ def localization_stop():
 
 @app.route("/stop", methods=["POST"])
 def stop():
+    local_motion_cancel_event.set()
     cancel_result = cancel_navigation_goal()
     stop_result = stop_robot()
 
