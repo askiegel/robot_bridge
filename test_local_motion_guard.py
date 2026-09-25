@@ -3,7 +3,7 @@ from local_motion_guard import continue_allowed, forward_clearance, start_allowe
 
 
 def snapshot(ranges, age=0.0, available=True):
-    return {"available": available, "age_seconds": age, "scan": {"angle_min": -0.4, "angle_increment": 0.1, "range_min": 0.1, "range_max": 5.0, "ranges": ranges}} if available else {"available": False, "age_seconds": None}
+    return {"available": available, "age_seconds": age, "scan": {"angle_min": -math.pi / 2 - 0.4, "angle_increment": 0.1, "frame_id": "lidar_link", "range_min": 0.1, "range_max": 5.0, "ranges": ranges}} if available else {"available": False, "age_seconds": None}
 
 
 def test_forward_sector_filters_ranges_and_thresholds():
