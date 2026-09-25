@@ -34,6 +34,7 @@ from candidate_map_telemetry import (
     CandidateMapTelemetry,
 )
 from lidar_telemetry import LidarTelemetry
+from local_motion_guard import (FORWARD_SPEED, MAX_DURATION_SECONDS, PUBLISH_HZ, START_CLEARANCE_M, STOP_CLEARANCE_M, forward_clearance, start_allowed, continue_allowed)
 from live_mapping_telemetry import LiveMappingTelemetry
 from mapping_readiness_telemetry import (
     MappingReadinessTelemetry,
@@ -128,6 +129,8 @@ publisher_node = None
 publisher_lock = threading.Lock()
 
 motion_lock = threading.RLock()
+local_motion_lock = threading.Lock()
+local_motion_active = False
 motion_state = {
     "streaming": False,
     "linear_x": 0.0,
@@ -1107,6 +1110,141 @@ def validate_motion_payload(payload):
         "streaming": streaming,
         "watchdog_timeout": watchdog_timeout,
     }, None
+
+
+@app.route("/local-motion/status", methods=["GET"])
+def local_motion_status():
+    gate = forward_clearance(lidar_telemetry.snapshot())
+    return jsonify({
+        "ok": True,
+        "active": local_motion_active,
+        "lidar_available": gate.get("reason") != "lidar_unavailable",
+        "lidar_age_seconds": gate.get("age_seconds"),
+        "forward_clearance_m": gate.get("clearance_m"),
+        "valid_sector_samples": gate.get("sample_count"),
+        "start_clear": start_allowed(gate),
+        "conflict": _local_motion_conflict(),
+        "thresholds": {"start_clearance_m": START_CLEARANCE_M,
+                       "stop_clearance_m": STOP_CLEARANCE_M,
+                       "max_scan_age_seconds": 0.30},
+        "fixed_speed": FORWARD_SPEED,
+        "maximum_duration_seconds": MAX_DURATION_SECONDS,
+    })
+
+
+def _local_motion_conflict():
+    return any(control.snapshot().get("running") for control in (
+        navigation_control, mapping_navigation_control,
+        planning_control, mapping_control,
+    ))
+
+
+def _local_motion_stop_reason(gate):
+    if gate.get("clearance_m") is not None:
+        return "forward_obstacle"
+    return {
+        "lidar_unavailable": "lidar_unavailable",
+        "lidar_stale": "lidar_stale",
+        "insufficient_forward_samples": "lidar_insufficient_samples",
+    }.get(gate.get("reason"), "lidar_unavailable")
+
+
+@app.route("/local-motion/forward", methods=["POST"])
+def local_motion_forward():
+    global local_motion_active
+    payload = request.get_json(silent=True)
+    if payload not in (None, {}):
+        return jsonify({"ok": False, "action": "local_forward",
+                        "executed": False, "stop_reason": "invalid_request"}), 400
+    if not local_motion_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "action": "local_forward",
+                        "executed": False, "stop_reason": "local_motion_active"}), 409
+
+    local_motion_active = True
+    started = time.monotonic()
+    gate = forward_clearance(lidar_telemetry.snapshot())
+    start_clearance = gate.get("clearance_m")
+    minimum_clearance = None
+    ownership = None
+    release = None
+    final_stop = None
+    executed = False
+    stop_reason = "failure"
+    response_status = 200
+    acquired = False
+    try:
+        if not ros_ready or publisher_node is None:
+            stop_reason = "ros_not_ready"
+            response_status = 503
+        elif _local_motion_conflict():
+            stop_reason = "runtime_conflict"
+            response_status = 409
+        elif not start_allowed(gate):
+            stop_reason = _local_motion_stop_reason(gate)
+        else:
+            initial_zero = stop_robot()
+            if not initial_zero.get("ok"):
+                stop_reason = "initial_zero_failed"
+                response_status = 503
+            else:
+                ownership = acquire_stanford_ownership()
+                if not ownership.get("ok"):
+                    stop_reason = "stanford_ownership_unavailable"
+                    response_status = 503
+                else:
+                    acquired = True
+                    motion_started = time.monotonic()
+                    while time.monotonic() - motion_started < MAX_DURATION_SECONDS:
+                        gate = forward_clearance(lidar_telemetry.snapshot())
+                        if not continue_allowed(gate):
+                            stop_reason = _local_motion_stop_reason(gate)
+                            break
+                        minimum_clearance = (gate["clearance_m"] if minimum_clearance is None
+                                             else min(minimum_clearance, gate["clearance_m"]))
+                        publish_result = publish_twist(FORWARD_SPEED, 0.0)
+                        if not publish_result.get("ok"):
+                            stop_reason = "motion_publish_failure"
+                            response_status = 503
+                            break
+                        executed = True
+                        remaining = MAX_DURATION_SECONDS - (
+                            time.monotonic() - motion_started
+                        )
+                        if remaining > 0.0:
+                            time.sleep(min(1.0 / PUBLISH_HZ, remaining))
+                    else:
+                        stop_reason = "duration_complete"
+    except Exception as exc:
+        stop_reason = "motion_failure"
+        response_status = 503
+        failure_error = str(exc)
+    finally:
+        if acquired:
+            clear_streaming_state()
+            final_stop = publish_twist(0.0, 0.0)
+            release = release_stanford_ownership()
+            if not final_stop.get("ok") or not release.get("ok"):
+                response_status = 503
+        local_motion_active = False
+        local_motion_lock.release()
+
+    result = {"ok": response_status < 400, "action": "local_forward",
+              "executed": executed, "stop_reason": stop_reason,
+              "requested_speed": FORWARD_SPEED,
+              "maximum_duration_seconds": MAX_DURATION_SECONDS,
+              "elapsed_seconds": time.monotonic() - started,
+              "start_clearance_m": start_clearance,
+              "minimum_clearance_m": minimum_clearance,
+              "lidar_age_seconds": gate.get("age_seconds"),
+              "lidar_sample_count": gate.get("sample_count"),
+              "stanford_ownership": ownership,
+              "stanford_ownership_release": release,
+              "final_stop_result": final_stop}
+    if "failure_error" in locals():
+        result["error"] = failure_error
+    if acquired and release and not release.get("ok"):
+        result["error"] = "Stanford ownership release failed."
+    return jsonify(result), response_status
 
 
 @app.route("/status", methods=["GET"])
