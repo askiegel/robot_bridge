@@ -62,3 +62,20 @@ def test_status_is_read_only(monkeypatch):
     monkeypatch.setattr(bridge,"publish_twist",lambda *x:events.append("publish")); monkeypatch.setattr(bridge,"acquire_stanford_ownership",lambda:events.append("acquire"))
     assert bridge.app.test_client().get("/local-motion/status").get_json()["start_clear"]
     assert events==[]
+
+
+def test_safety_zero_does_not_cancel_local_motion(monkeypatch):
+    bridge.local_motion_cancel_event.clear()
+    calls=[]
+    monkeypatch.setattr(bridge, "stop_robot", lambda: calls.append("zero") or {"ok": True})
+    response=bridge.app.test_client().post("/safety-zero")
+    assert response.status_code == 200 and response.get_json()["action"] == "safety_zero"
+    assert calls == ["zero"] and not bridge.local_motion_cancel_event.is_set()
+
+def test_stop_sets_local_motion_cancellation(monkeypatch):
+    bridge.local_motion_cancel_event.clear()
+    monkeypatch.setattr(bridge, "cancel_navigation_goal", lambda: {})
+    monkeypatch.setattr(bridge, "stop_robot", lambda: {"ok": True})
+    bridge.app.test_client().post("/stop")
+    assert bridge.local_motion_cancel_event.is_set()
+    bridge.local_motion_cancel_event.clear()

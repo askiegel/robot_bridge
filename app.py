@@ -4313,6 +4313,17 @@ def localization_stop():
     )
 
 
+@app.route("/safety-zero", methods=["POST"])
+def safety_zero():
+    stop_result = stop_robot()
+    return jsonify({
+        "ok": bool(stop_result.get("ok")),
+        "action": "safety_zero",
+        "timestamp": now_iso(),
+        "stop_result": stop_result,
+    }), (200 if stop_result.get("ok") else 503)
+
+
 @app.route("/stop", methods=["POST"])
 def stop():
     local_motion_cancel_event.set()
