@@ -23,6 +23,7 @@ lock = threading.Lock()
 
 latest_jpeg = None
 latest_timestamp = None
+latest_source_stamp = None
 latest_frame_monotonic = None
 
 ros_ready = False
@@ -49,6 +50,7 @@ class CameraRelayNode(Node):
     def image_callback(self, message):
         global latest_jpeg
         global latest_timestamp
+        global latest_source_stamp
         global latest_frame_monotonic
 
         try:
@@ -66,12 +68,17 @@ class CameraRelayNode(Node):
                 f"{message.header.stamp.sec}."
                 f"{message.header.stamp.nanosec:09d}"
             )
+            source_stamp = (
+                int(message.header.stamp.sec),
+                int(message.header.stamp.nanosec),
+            )
 
             now = time.monotonic()
 
             with lock:
                 latest_jpeg = jpeg
                 latest_timestamp = timestamp
+                latest_source_stamp = source_stamp
                 latest_frame_monotonic = now
 
         except Exception as exc:
@@ -170,6 +177,7 @@ def status():
 def latest_camera_frame():
     with lock:
         jpeg = latest_jpeg
+        source_stamp = latest_source_stamp
 
     if jpeg is None:
         return jsonify(
@@ -182,15 +190,21 @@ def latest_camera_frame():
             }
         ), 503
 
-    return Response(
-        jpeg,
-        mimetype="image/jpeg",
-        headers={
-            "Cache-Control":
-                "no-store, no-cache, "
-                "must-revalidate",
-        },
-    )
+    headers = {
+        "Cache-Control":
+            "no-store, no-cache, "
+            "must-revalidate",
+    }
+    if source_stamp is not None:
+        sec, nanosec = source_stamp
+        headers.update({
+            "X-Mayday-Source-Stamp-Sec": str(sec),
+            "X-Mayday-Source-Stamp-Nanosec": str(nanosec),
+            "X-Mayday-Source-Stamp-Ns": str(
+                sec * 1_000_000_000 + nanosec
+            ),
+        })
+    return Response(jpeg, mimetype="image/jpeg", headers=headers)
 
 
 def main():
