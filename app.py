@@ -2,6 +2,7 @@
 
 import atexit
 import json
+import math
 import threading
 import time
 from collections import deque
@@ -112,6 +113,7 @@ PORT = 8090
 MOTION_TOPIC = "/cmd_vel"
 
 MAX_LINEAR_X = 0.50
+MAX_LINEAR_Y = 0.10  # Bridge ceiling; initial avoidance requests only 0.08 m/s.
 MAX_ANGULAR_Z = 1.00
 MAX_DURATION = 2.00
 
@@ -135,6 +137,7 @@ local_motion_cancel_event = threading.Event()
 motion_state = {
     "streaming": False,
     "linear_x": 0.0,
+    "linear_y": 0.0,
     "angular_z": 0.0,
     "deadline_monotonic": None,
     "last_command_at": None,
@@ -259,13 +262,14 @@ def _complete_motion_audit_segment(
     )
 
 
-def record_motion_egress(linear_x, angular_z):
+def record_motion_egress(linear_x, angular_z, linear_y=0.0):
     """Record a Twist only after the final ROS publisher accepts it."""
     linear_x = float(linear_x)
     angular_z = float(angular_z)
     timestamp = now_iso()
     monotonic_time = time.monotonic()
-    is_zero = linear_x == 0.0 and angular_z == 0.0
+    linear_y = float(linear_y)
+    is_zero = linear_x == linear_y == angular_z == 0.0
 
     with motion_audit_lock:
         sequence = motion_audit["next_sequence"]
@@ -296,6 +300,7 @@ def record_motion_egress(linear_x, angular_z):
                     previous_segment_id
                 ),
                 "linear_x": linear_x,
+                "linear_y": linear_y,
                 "angular_z": angular_z,
                 "source": None,
             }
@@ -313,6 +318,7 @@ def record_motion_egress(linear_x, angular_z):
         if (
             active_segment is not None
             and active_segment["linear_x"] == linear_x
+            and active_segment.get("linear_y", 0.0) == linear_y
             and active_segment["angular_z"] == angular_z
         ):
             active_segment["publish_count"] += 1
@@ -336,6 +342,7 @@ def record_motion_egress(linear_x, angular_z):
             "end_monotonic": None,
             "elapsed_duration": None,
             "linear_x": linear_x,
+            "linear_y": linear_y,
             "angular_z": angular_z,
             "publish_count": 1,
             "state": "active",
@@ -354,6 +361,7 @@ def record_motion_egress(linear_x, angular_z):
                     "segment_id": segment["segment_id"],
                     "sequence": sequence,
                     "linear_x": linear_x,
+                    "linear_y": linear_y,
                     "angular_z": angular_z,
                 },
                 sort_keys=True,
@@ -783,11 +791,11 @@ class RobotBridgePublisher(Node):
             .cancel_active()
         )
 
-    def publish_motion(self, linear_x, angular_z):
+    def publish_motion(self, linear_x, angular_z, linear_y=0.0):
         message = Twist()
 
         message.linear.x = float(linear_x)
-        message.linear.y = 0.0
+        message.linear.y = float(linear_y)
         message.linear.z = 0.0
 
         message.angular.x = 0.0
@@ -798,6 +806,7 @@ class RobotBridgePublisher(Node):
         record_motion_egress(
             message.linear.x,
             message.angular.z,
+            linear_y=message.linear.y,
         )
 
 
@@ -855,7 +864,7 @@ def ros_spin():
             pass
 
 
-def publish_twist(linear_x, angular_z):
+def publish_twist(linear_x, angular_z, linear_y=0.0):
     if not ros_ready or publisher_node is None:
         return {
             "ok": False,
@@ -867,14 +876,15 @@ def publish_twist(linear_x, angular_z):
 
     try:
         with publisher_lock:
+            lateral = {"linear_y": linear_y} if linear_y else {}
             publisher_node.publish_motion(
-                linear_x=linear_x,
-                angular_z=angular_z,
+                linear_x=linear_x, angular_z=angular_z, **lateral,
             )
 
         return {
             "ok": True,
             "linear_x": float(linear_x),
+            "linear_y": float(linear_y),
             "angular_z": float(angular_z),
         }
 
@@ -891,6 +901,7 @@ def clear_streaming_state():
     with motion_lock:
         motion_state["streaming"] = False
         motion_state["linear_x"] = 0.0
+        motion_state["linear_y"] = 0.0
         motion_state["angular_z"] = 0.0
         motion_state["deadline_monotonic"] = None
         motion_state["last_stop_at"] = now_iso()
@@ -930,6 +941,7 @@ def set_streaming_motion(
     linear_x,
     angular_z,
     timeout_seconds,
+    linear_y=0.0,
 ):
     deadline = (
         time.monotonic()
@@ -943,6 +955,7 @@ def set_streaming_motion(
         motion_state["linear_x"] = float(
             linear_x
         )
+        motion_state["linear_y"] = float(linear_y)
         motion_state["angular_z"] = float(
             angular_z
         )
@@ -956,6 +969,7 @@ def set_streaming_motion(
     return {
         "ok": True,
         "linear_x": float(linear_x),
+        "linear_y": float(linear_y),
         "angular_z": float(angular_z),
         "watchdog_timeout_seconds": float(
             timeout_seconds
@@ -968,6 +982,7 @@ def streaming_motion_step():
     should_publish_motion = False
     should_publish_stop = False
     linear_x = 0.0
+    linear_y = 0.0
     angular_z = 0.0
 
     with motion_lock:
@@ -982,6 +997,7 @@ def streaming_motion_step():
             ):
                 motion_state["streaming"] = False
                 motion_state["linear_x"] = 0.0
+                motion_state["linear_y"] = 0.0
                 motion_state["angular_z"] = 0.0
                 motion_state["deadline_monotonic"] = None
                 motion_state["last_stop_at"] = now_iso()
@@ -991,11 +1007,12 @@ def streaming_motion_step():
 
             else:
                 linear_x = motion_state["linear_x"]
+                linear_y = motion_state.get("linear_y", 0.0)
                 angular_z = motion_state["angular_z"]
                 should_publish_motion = True
 
     if should_publish_motion:
-        return publish_twist(linear_x, angular_z)
+        return publish_twist(linear_x, angular_z, **({"linear_y": linear_y} if linear_y else {}))
 
     if should_publish_stop:
         result = publish_twist(0.0, 0.0)
@@ -1027,7 +1044,10 @@ def streaming_motion_loop():
 
 
 def validate_motion_payload(payload):
+    if not isinstance(payload, dict) or isinstance(payload.get("linear_y"), bool):
+        return None, {"ok": False, "error": "Motion must be an object with numeric axes."}
     try:
+        linear_y = float(payload.get("linear_y", 0.0))
         linear_x = float(
             payload.get("linear_x", 0.0)
         )
@@ -1051,14 +1071,21 @@ def validate_motion_payload(payload):
             )
         )
 
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None, {
             "ok": False,
             "error": (
-                "linear_x, angular_z, duration, "
+                "linear_x, linear_y, angular_z, duration, "
                 "and watchdog_timeout must be numeric."
             ),
         }
+
+    if not all(math.isfinite(v) for v in (linear_x, linear_y, angular_z, duration, watchdog_timeout)):
+        return None, {"ok": False, "error": "Motion values must be finite."}
+    if abs(linear_y) > MAX_LINEAR_Y:
+        return None, {"ok": False, "error": f"linear_y exceeds safe limit of {MAX_LINEAR_Y}."}
+    if linear_y and (linear_x or angular_z):
+        return None, {"ok": False, "error": "Lateral motion requires zero linear_x and angular_z."}
 
     if abs(linear_x) > MAX_LINEAR_X:
         return None, {
@@ -1106,6 +1133,7 @@ def validate_motion_payload(payload):
 
     return {
         "linear_x": linear_x,
+        "linear_y": linear_y,
         "angular_z": angular_z,
         "duration": duration,
         "streaming": streaming,
@@ -1267,6 +1295,7 @@ def status():
             "linear_x": float(
                 motion_state["linear_x"]
             ),
+            "linear_y": float(motion_state.get("linear_y", 0.0)),
             "angular_z": float(
                 motion_state["angular_z"]
             ),
@@ -1309,6 +1338,7 @@ def status():
                 STREAM_DEFAULT_TIMEOUT_SECONDS
             ),
             "motion": stream_snapshot,
+            "motion_capabilities": {"linear_y": True, "max_linear_y": MAX_LINEAR_Y},
             "speech": speech_service.status(),
         }
     )
@@ -1672,6 +1702,8 @@ def motion():
     if error is not None:
         return jsonify(error), 400
 
+    linear_y = parsed["linear_y"]
+    lateral = {"linear_y": linear_y} if linear_y else {}
     linear_x = parsed["linear_x"]
     angular_z = parsed["angular_z"]
     duration = parsed["duration"]
@@ -1684,6 +1716,7 @@ def motion():
         initial_result = publish_twist(
             linear_x=linear_x,
             angular_z=angular_z,
+            **lateral,
         )
 
         if not initial_result.get("ok"):
@@ -1709,6 +1742,7 @@ def motion():
             linear_x=linear_x,
             angular_z=angular_z,
             timeout_seconds=watchdog_timeout,
+            **lateral,
         )
 
         return jsonify(
@@ -1718,6 +1752,7 @@ def motion():
                 "mode": "streaming",
                 "timestamp": now_iso(),
                 "linear_x": linear_x,
+                "linear_y": linear_y,
                 "angular_z": angular_z,
                 "watchdog_timeout": (
                     watchdog_timeout
@@ -1730,9 +1765,14 @@ def motion():
 
     clear_streaming_state()
 
+    with motion_lock:
+        motion_state.update(linear_x=linear_x, linear_y=linear_y, angular_z=angular_z,
+                            last_command_at=now_iso())
+
     motion_result = publish_twist(
         linear_x=linear_x,
         angular_z=angular_z,
+        **lateral,
     )
 
     if not motion_result.get("ok"):
@@ -1768,6 +1808,7 @@ def motion():
                     "automatic stop failed."
                 ),
                 "linear_x": linear_x,
+                "linear_y": linear_y,
                 "angular_z": angular_z,
                 "duration": duration,
                 "motion_result": motion_result,
@@ -1782,6 +1823,7 @@ def motion():
             "mode": "bounded",
             "timestamp": now_iso(),
             "linear_x": linear_x,
+            "linear_y": linear_y,
             "angular_z": angular_z,
             "duration": duration,
             "automatic_stop": True,
