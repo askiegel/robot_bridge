@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 
 import rclpy
 from flask import Flask, jsonify, request
+from champ_heartbeat import HeartbeatCommands
+from champ_ros_adapter import ChampTransport
+from pathlib import Path
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import Twist
 from cartographer_ros_msgs.msg import SubmapList
@@ -404,6 +407,10 @@ class RobotBridgePublisher(Node):
             10,
         )
 
+        self.champ_transport = ChampTransport(
+            self, lambda: self.publisher.publish(Twist()), on_status=self.record_controller_state)
+        self.champ_commands = HeartbeatCommands(
+            self.champ_transport, Path('/proc/sys/kernel/random/boot_id').read_text().strip())
         self.navigation_preflight_lock = threading.Lock()
         self.latest_scan_stamp = None
         self.latest_scan_frame = None
@@ -791,7 +798,28 @@ class RobotBridgePublisher(Node):
             .cancel_active()
         )
 
+    def record_controller_state(self, state):
+        axes = (state['linear_x'], state['linear_y'], state['angular_z'])
+        with motion_lock:
+            before = (motion_state['linear_x'], motion_state['linear_y'], motion_state['angular_z'])
+            if state['active']:
+                motion_state.update(linear_x=axes[0], linear_y=axes[1], angular_z=axes[2], streaming=False)
+                if before != axes:
+                    motion_state['last_command_at'] = now_iso()
+                    record_motion_egress(axes[0], axes[2], linear_y=axes[1])
+            elif state['gait_zero']:
+                motion_state.update(linear_x=0., linear_y=0., angular_z=0., streaming=False)
+                if any(before):
+                    motion_state['last_stop_at'] = now_iso()
+                    record_motion_egress(0., 0.)
+                    if state['reason'] not in ('scoped_gait_zero', 'command_deadline_expired'):
+                        with motion_audit_lock:
+                            if motion_audit['recent_segments']:
+                                motion_audit['recent_segments'][-1]['state'] = 'interrupted'
+
     def publish_motion(self, linear_x, angular_z, linear_y=0.0):
+        if linear_x or linear_y or angular_z:
+            raise RuntimeError("legacy_nonzero_twist_refused_use_bounded_heartbeat")
         message = Twist()
 
         message.linear.x = float(linear_x)
@@ -927,14 +955,10 @@ def cancel_navigation_goal():
 
 
 def stop_robot():
-    clear_streaming_state()
-
-    result = publish_twist(0.0, 0.0)
-
-    if result.get("ok"):
-        time.sleep(0.05)
-
-    return result
+    # Revocation and scoped heartbeat fencing happen before zero publication.
+    if not ros_ready or publisher_node is None or not hasattr(publisher_node, 'champ_commands'):
+        return {"ok": False, "error": "guarded_controller_not_ready"}
+    return publisher_node.champ_commands.emergency_stop()
 
 
 def set_streaming_motion(
@@ -979,53 +1003,7 @@ def set_streaming_motion(
 
 
 def streaming_motion_step():
-    should_publish_motion = False
-    should_publish_stop = False
-    linear_x = 0.0
-    linear_y = 0.0
-    angular_z = 0.0
-
-    with motion_lock:
-        if motion_state["streaming"]:
-            deadline = motion_state[
-                "deadline_monotonic"
-            ]
-
-            if (
-                deadline is not None
-                and time.monotonic() >= deadline
-            ):
-                motion_state["streaming"] = False
-                motion_state["linear_x"] = 0.0
-                motion_state["linear_y"] = 0.0
-                motion_state["angular_z"] = 0.0
-                motion_state["deadline_monotonic"] = None
-                motion_state["last_stop_at"] = now_iso()
-                motion_state["watchdog_stop_count"] += 1
-
-                should_publish_stop = True
-
-            else:
-                linear_x = motion_state["linear_x"]
-                linear_y = motion_state.get("linear_y", 0.0)
-                angular_z = motion_state["angular_z"]
-                should_publish_motion = True
-
-    if should_publish_motion:
-        return publish_twist(linear_x, angular_z, **({"linear_y": linear_y} if linear_y else {}))
-
-    if should_publish_stop:
-        result = publish_twist(0.0, 0.0)
-
-        print(
-            "Robot Bridge streaming watchdog "
-            "published automatic stop.",
-            flush=True,
-        )
-
-        return result
-
-    return None
+    return {"ok": False, "error": "streaming_not_admitted_in_guarded_mode"}
 
 
 def streaming_motion_loop():
@@ -1180,110 +1158,7 @@ def _local_motion_stop_reason(gate):
 
 @app.route("/local-motion/forward", methods=["POST"])
 def local_motion_forward():
-    global local_motion_active
-    payload = request.get_json(silent=True)
-    if payload not in (None, {}):
-        return jsonify({"ok": False, "action": "local_forward",
-                        "executed": False, "stop_reason": "invalid_request"}), 400
-    if not local_motion_lock.acquire(blocking=False):
-        return jsonify({"ok": False, "action": "local_forward",
-                        "executed": False, "stop_reason": "local_motion_active"}), 409
-
-    local_motion_cancel_event.clear()
-    local_motion_active = True
-    started = time.monotonic()
-    gate = forward_clearance(lidar_telemetry.snapshot())
-    start_clearance = gate.get("clearance_m")
-    minimum_clearance = None
-    ownership = None
-    release = None
-    final_stop = None
-    executed = False
-    stop_reason = "failure"
-    response_status = 200
-    acquired = False
-    try:
-        if local_motion_cancel_event.is_set():
-            stop_reason = "local_motion_cancelled"
-        elif not ros_ready or publisher_node is None:
-            stop_reason = "ros_not_ready"
-            response_status = 503
-        elif _local_motion_conflict():
-            stop_reason = "runtime_conflict"
-            response_status = 409
-        elif not start_allowed(gate):
-            stop_reason = _local_motion_stop_reason(gate)
-        else:
-            initial_zero = stop_robot()
-            if not initial_zero.get("ok"):
-                stop_reason = "initial_zero_failed"
-                response_status = 503
-            else:
-                ownership = acquire_stanford_ownership()
-                if local_motion_cancel_event.is_set() and ownership.get("ok"):
-                    acquired = True
-                    stop_reason = "local_motion_cancelled"
-                elif not ownership.get("ok"):
-                    stop_reason = "stanford_ownership_unavailable"
-                    response_status = 503
-                else:
-                    acquired = True
-                    motion_started = time.monotonic()
-                    while time.monotonic() - motion_started < MAX_DURATION_SECONDS:
-                        if local_motion_cancel_event.is_set():
-                            stop_reason = "local_motion_cancelled"
-                            break
-                        gate = forward_clearance(lidar_telemetry.snapshot())
-                        if not continue_allowed(gate):
-                            stop_reason = _local_motion_stop_reason(gate)
-                            break
-                        minimum_clearance = (gate["clearance_m"] if minimum_clearance is None
-                                             else min(minimum_clearance, gate["clearance_m"]))
-                        publish_result = publish_twist(FORWARD_SPEED, 0.0)
-                        if not publish_result.get("ok"):
-                            stop_reason = "motion_publish_failure"
-                            response_status = 503
-                            break
-                        executed = True
-                        remaining = MAX_DURATION_SECONDS - (
-                            time.monotonic() - motion_started
-                        )
-                        if remaining > 0.0:
-                            time.sleep(min(1.0 / PUBLISH_HZ, remaining))
-                    else:
-                        stop_reason = "duration_complete"
-    except Exception as exc:
-        stop_reason = "motion_failure"
-        response_status = 503
-        failure_error = str(exc)
-    finally:
-        if acquired:
-            clear_streaming_state()
-            final_stop = publish_twist(0.0, 0.0)
-            release = release_stanford_ownership()
-            if not final_stop.get("ok") or not release.get("ok"):
-                response_status = 503
-        local_motion_active = False
-        local_motion_lock.release()
-
-    result = {"ok": response_status < 400, "action": "local_forward",
-              "executed": executed, "stop_reason": stop_reason,
-              "requested_speed": FORWARD_SPEED,
-              "maximum_duration_seconds": MAX_DURATION_SECONDS,
-              "elapsed_seconds": time.monotonic() - started,
-              "start_clearance_m": start_clearance,
-              "minimum_clearance_m": minimum_clearance,
-              "lidar_age_seconds": gate.get("age_seconds"),
-              "lidar_sample_count": gate.get("sample_count"),
-              "stanford_ownership": ownership,
-              "stanford_ownership_release": release,
-              "final_stop_result": final_stop}
-    if "failure_error" in locals():
-        result["error"] = failure_error
-    if acquired and release and not release.get("ok"):
-        result["error"] = "Stanford ownership release failed."
-    return jsonify(result), response_status
-
+    return jsonify(ok=False, executed=False, stop_reason="local_motion_not_admitted_in_guarded_mode"), 409
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -1702,135 +1577,26 @@ def motion():
     if error is not None:
         return jsonify(error), 400
 
-    linear_y = parsed["linear_y"]
-    lateral = {"linear_y": linear_y} if linear_y else {}
-    linear_x = parsed["linear_x"]
-    angular_z = parsed["angular_z"]
-    duration = parsed["duration"]
-    streaming = parsed["streaming"]
-    watchdog_timeout = parsed[
-        "watchdog_timeout"
-    ]
-
-    if streaming:
-        initial_result = publish_twist(
-            linear_x=linear_x,
-            angular_z=angular_z,
-            **lateral,
-        )
-
-        if not initial_result.get("ok"):
-            stop_robot()
-
-            return jsonify(
-                {
-                    "ok": False,
-                    "action": "motion",
-                    "mode": "streaming",
-                    "timestamp": now_iso(),
-                    "error": initial_result.get(
-                        "error",
-                        "ROS2 motion publish failed.",
-                    ),
-                    "motion_result": (
-                        initial_result
-                    ),
-                }
-            ), 503
-
-        stream_result = set_streaming_motion(
-            linear_x=linear_x,
-            angular_z=angular_z,
-            timeout_seconds=watchdog_timeout,
-            **lateral,
-        )
-
-        return jsonify(
-            {
-                "ok": True,
-                "action": "motion",
-                "mode": "streaming",
-                "timestamp": now_iso(),
-                "linear_x": linear_x,
-                "linear_y": linear_y,
-                "angular_z": angular_z,
-                "watchdog_timeout": (
-                    watchdog_timeout
-                ),
-                "automatic_stop": True,
-                "returned_immediately": True,
-                "stream_result": stream_result,
-            }
-        )
-
-    clear_streaming_state()
-
-    with motion_lock:
-        motion_state.update(linear_x=linear_x, linear_y=linear_y, angular_z=angular_z,
-                            last_command_at=now_iso())
-
-    motion_result = publish_twist(
-        linear_x=linear_x,
-        angular_z=angular_z,
-        **lateral,
-    )
-
-    if not motion_result.get("ok"):
-        stop_robot()
-
-        return jsonify(
-            {
-                "ok": False,
-                "action": "motion",
-                "mode": "bounded",
-                "timestamp": now_iso(),
-                "error": motion_result.get(
-                    "error",
-                    "ROS2 motion publish failed.",
-                ),
-                "motion_result": motion_result,
-            }
-        ), 503
-
-    time.sleep(duration)
-
-    stop_result = stop_robot()
-
-    if not stop_result.get("ok"):
-        return jsonify(
-            {
-                "ok": False,
-                "action": "motion",
-                "mode": "bounded",
-                "timestamp": now_iso(),
-                "error": (
-                    "Motion executed, but "
-                    "automatic stop failed."
-                ),
-                "linear_x": linear_x,
-                "linear_y": linear_y,
-                "angular_z": angular_z,
-                "duration": duration,
-                "motion_result": motion_result,
-                "stop_result": stop_result,
-            }
-        ), 500
-
-    return jsonify(
-        {
-            "ok": True,
-            "action": "motion",
-            "mode": "bounded",
-            "timestamp": now_iso(),
-            "linear_x": linear_x,
-            "linear_y": linear_y,
-            "angular_z": angular_z,
-            "duration": duration,
-            "automatic_stop": True,
-            "returned_immediately": False,
-        }
-    )
-
+    if parsed['streaming']:
+        return jsonify(ok=False, error="streaming_not_admitted_in_guarded_mode"), 409
+    if not ros_ready or publisher_node is None or not hasattr(publisher_node, 'champ_commands'):
+        return jsonify(ok=False, error="guarded_controller_not_ready"), 503
+    axes = (parsed['linear_x'], parsed['linear_y'], parsed['angular_z'])
+    if sum(v != 0 for v in axes) != 1:
+        if all(v == 0 for v in axes):
+            result = stop_robot()
+            return jsonify(result), (200 if result.get('ok') else 503)
+        return jsonify(ok=False, error="mixed_axes_not_admitted_in_guarded_mode"), 400
+    # The manager owns admission/transport; update telemetry only for its current
+    # command rather than clobbering a concurrent owner's state.
+    result = publisher_node.champ_commands.execute(*axes, parsed['duration'])
+    # Only controller callbacks update motion telemetry; an old response must
+    # not clear a replacement command admitted after this call completes.
+    response = dict(result, action='motion', mode='bounded', timestamp=now_iso(),
+                    linear_x=axes[0], linear_y=axes[1], angular_z=axes[2],
+                    duration=parsed['duration'], automatic_stop=result.get('controller_gait_zero', False),
+                    returned_immediately=False)
+    return jsonify(response), (200 if result['ok'] else 409 if result['state']=='refused' else 503)
 
 @app.route("/speak", methods=["POST"])
 def speak():
@@ -2213,6 +1979,7 @@ def mapping_navigation_control_status():
     methods=["POST"],
 )
 def mapping_navigation_start():
+    return jsonify(ok=False, reason="navigation_motion_not_admitted_in_guarded_mode"), 409
     stop_result = stop_robot()
     timestamp = now_iso()
 
@@ -2445,6 +2212,7 @@ def mapping_navigation_start():
     methods=["POST"],
 )
 def mapping_navigation_goal():
+    return jsonify(ok=False, reason="navigation_motion_not_admitted_in_guarded_mode"), 409
     initial_stop_result = stop_robot()
     timestamp = now_iso()
 
@@ -3030,6 +2798,7 @@ def navigation_control_status():
 
 @app.route("/navigation/start", methods=["POST"])
 def navigation_start():
+    return jsonify(ok=False, reason="navigation_motion_not_admitted_in_guarded_mode"), 409
     stop_result = stop_robot()
 
     if not stop_result.get('ok'):
@@ -3382,6 +3151,7 @@ def navigation_initialize_localization():
 
 @app.route("/navigation/goal", methods=["POST"])
 def navigation_goal():
+    return jsonify(ok=False, reason="navigation_motion_not_admitted_in_guarded_mode"), 409
     initial_stop_result = stop_robot()
     timestamp = now_iso()
     navigation = navigation_control.snapshot()

@@ -27,24 +27,13 @@ class RosMotion:
             self._initialized = True
 
     def _publish_twist(self, linear_x=0.0, angular_z=0.0):
+        if linear_x or angular_z:
+            raise RuntimeError("legacy_nonzero_twist_refused")
         msg = Twist()
-        msg.linear.x = float(linear_x)
-        msg.angular.z = float(angular_z)
-        self._publisher.publish(msg)
-        rclpy.spin_once(self._node, timeout_sec=0.02)
+        self._publisher.publish(msg)  # Explicit unconditional emergency zero.
 
     def publish_motion(self, linear_x=0.0, angular_z=0.0, duration=0.25):
-        self.initialize()
-
-        try:
-            end_time = time.time() + float(duration)
-
-            while time.time() < end_time:
-                self._publish_twist(linear_x, angular_z)
-                time.sleep(0.05)
-
-        finally:
-            self.stop()
+        raise RuntimeError("use_guarded_bounded_bridge_endpoint")
 
     def stop(self):
         self.initialize()
