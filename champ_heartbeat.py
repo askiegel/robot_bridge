@@ -63,24 +63,45 @@ class HeartbeatCommands:
             s = self._status()
             if s and s['controller_session'] != p['controller_session']:
                 return False, 'controller_restarted'
-            if (s and s.get('last_operation') == p['operation']
-                    and s.get('last_request_generation') == p['generation']
-                    and s.get('last_request_sequence') == p['sequence']
-                    and s.get('last_request_issued_ns') == p['issued_ns']):
-                if s.get('last_request_accepted') is not True:
-                    return False, s.get('reason', 'controller_refused')
-                if zero:
-                    if s.get('active') is False and s.get('gait_zero') is True:
-                        return True, s.get('reason')
-                elif (s.get('bridge_epoch') == self.epoch and s.get('active') is True
-                      and s.get('generation') == p['generation']
-                      and s.get('sequence') == p['sequence']
-                      and s.get('deadline_ns') == p['deadline_ns']):
-                    return True, 'controller_accepted'
-            # Cancellation changes last_request. Do not wait for an old ack.
+            accepted = None if zero or not s else self.transport.acknowledgement(p)
+            accepted_exact = (accepted and accepted.get('generation') == p['generation']
+                              and accepted.get('sequence') == p['sequence']
+                              and accepted.get('deadline_ns') == p['deadline_ns'])
+            # Record acceptance as a historical fact even when cancellation has
+            # won. It cannot restore active authority or completed progress.
             with self.lock:
+                if (accepted_exact and self.current
+                        and self.current['generation'] == p['generation']
+                        and p['bridge_epoch'] == self.epoch
+                        and p['controller_session'] == self.session):
+                    self.current['acceptance'] = {
+                        k: accepted[k] for k in (
+                            'controller_session', 'bridge_epoch', 'last_operation',
+                            'last_request_generation', 'last_request_sequence',
+                            'last_request_issued_ns', 'last_request_accepted', 'evaluated_ns')}
                 if p['operation'] in (START, HEARTBEAT) and self.current and self.current['retired']:
                     return False, 'command_cancelled'
+            exact = (s and s.get('last_operation') == p['operation']
+                     and s.get('last_request_generation') == p['generation']
+                     and s.get('last_request_sequence') == p['sequence']
+                     and s.get('last_request_issued_ns') == p['issued_ns'])
+            if zero:
+                if exact:
+                    if s.get('last_request_accepted') is not True:
+                        return False, s.get('reason', 'controller_refused')
+                    if s.get('active') is False and s.get('gait_zero') is True:
+                        return True, s.get('reason')
+            elif s:
+                if accepted_exact:
+                    # Acceptance and the latest outcome have separate meaning.
+                    if (s.get('bridge_epoch') != p['bridge_epoch']
+                            or s.get('generation') != p['generation']):
+                        return False, 'controller_command_owner_changed'
+                    if s.get('active') is not True:
+                        return True, s.get('reason', 'controller_interrupted')
+                    return True, 'controller_accepted'
+                if exact and s.get('last_request_accepted') is not True:
+                    return False, s.get('reason', 'controller_refused')
             self.sleep(.005)
         return False, 'controller_ack_timeout'
 
@@ -147,6 +168,8 @@ class HeartbeatCommands:
         ok, why = self._ack(p)
         if not ok:
             return self._finish(c, 'interrupted' if c['retired'] else 'uncertain', why, attempted)
+        if why != 'controller_accepted':
+            return self._finish(c, 'interrupted', why, attempted)
         next_send = p['issued_ns'] + HEARTBEAT_NS
         while self.clock() < c['end']:
             with self.lock:
@@ -161,7 +184,12 @@ class HeartbeatCommands:
                 now = self.clock()
                 if now >= c['end']:
                     break
-                if now >= next_send:
+                # Avoid a needless last-tail heartbeat: the already accepted
+                # receipt covers this tail under the unchanged expiry bound.
+                # This neither extends nor truncates the immutable command end.
+                covered_tail = (c['end'] - now < HEARTBEAT_NS
+                                and c['end'] - c['last_send'] < TIMEOUT_NS)
+                if now >= next_send and not covered_tail:
                     c['sequence'] += 1
                     p = self._packet(HEARTBEAT, c)
                     try:
@@ -176,6 +204,8 @@ class HeartbeatCommands:
                 ok, why = self._ack(p)
                 if not ok:
                     return self._finish(c, 'interrupted' if c['retired'] else 'uncertain', why, attempted)
+            if p and why != 'controller_accepted':
+                return self._finish(c, 'interrupted', why, attempted)
             self.sleep(min(.005, max(0, (c['end']-self.clock())/1e9)))
         with self.lock:
             s = self._status()
@@ -228,7 +258,8 @@ class HeartbeatCommands:
         r = self._result(state, reason, attempted, ok)
         r.update(generation=c['generation'], start_ns=c['start'], deadline_ns=c['end'],
                  controller_session=self.session, bridge_epoch=self.epoch,
-                 stop_reason=stop_reason)
+                 stop_reason=stop_reason,
+                 controller_acceptance=c.get('acceptance'))
         return r
 
     def emergency_stop(self):
