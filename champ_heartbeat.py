@@ -88,6 +88,8 @@ class HeartbeatCommands:
             if self.current is not c or c['retired']:
                 return False  # Reader/cancellation cannot restore authority.
             c['lidar_safety'] = gate
+            if gate['permitted'] is True:
+                c['last_verified_lidar'] = dict(gate)
             c['next_safety_check'] = self.clock() + SAFETY_POLL_NS
             if gate['permitted'] is not True:
                 c['safety_failure'] = gate['reason']
@@ -175,6 +177,16 @@ class HeartbeatCommands:
                             or s.get('sequence') != p['sequence']):
                         return False, 'controller_command_owner_changed'
                     if self._zero(s):
+                        if p['operation'] == STOP:
+                            with self.lock:
+                                c = self.current
+                                if c and c.get('stop_packet') == p:
+                                    c['stop_certificate'] = {k: s[k] for k in (
+                                        'controller_session', 'bridge_epoch', 'generation', 'sequence',
+                                        'evaluated_ns', 'last_operation', 'last_request_generation',
+                                        'last_request_sequence', 'last_request_issued_ns',
+                                        'last_request_accepted', 'active', 'gait_zero',
+                                        'linear_x', 'linear_y', 'angular_z')}
                         return True, s.get('reason')
             elif s:
                 if accepted_exact:
@@ -245,7 +257,8 @@ class HeartbeatCommands:
             c = dict(generation=self.generation, sequence=1, start=now,
                      end=now+int(duration*1e9), axes=(x,y,yaw), retired=False, cancelled=False, last_send=now,
                      stop_packet=None, stop_result=None, lidar_safety=gate,
-                     next_safety_check=0, safety_failure=None)
+                     next_safety_check=0, safety_failure=None, last_verified_lidar=dict(gate),
+                     stop_certificate=None)
             self.current = c
             if not self._check_safety(c):
                 self.current = None  # START was never published; no scoped STOP.
@@ -365,8 +378,30 @@ class HeartbeatCommands:
         r.update(generation=c['generation'], start_ns=c['start'], deadline_ns=c['end'],
                  controller_session=self.session, bridge_epoch=self.epoch,
                  stop_reason=stop_reason,
-                 controller_acceptance=c.get('acceptance'), lidar_safety=c['lidar_safety'])
+                 controller_acceptance=c.get('acceptance'), lidar_safety=c['lidar_safety'],
+                 stop_certificate=c.get('stop_certificate') if ok else None,
+                 last_verified_lidar={k: c['last_verified_lidar'][k] for k in (
+                     'producer_session', 'acquisition_sequence', 'source_stamp_ns')})
         return r
+
+    def recovery_status(self):
+        """GET-only bounded controller evidence; contention grants no authority."""
+        if not self.lock.acquire(blocking=False):
+            return dict(available=False)
+        try:
+            s = self._status()
+            if not s:
+                return dict(available=False)
+            fields = ('protocol_version', 'controller_session', 'bridge_epoch',
+                      'generation', 'sequence', 'evaluated_ns', 'active', 'gait_zero',
+                      'linear_x', 'linear_y', 'angular_z', 'last_operation',
+                      'last_request_generation', 'last_request_sequence',
+                      'last_request_issued_ns', 'last_request_accepted')
+            return dict({k: s[k] for k in fields}, available=True,
+                        effective_age_seconds=(self.clock()-s["evaluated_ns"])/1e9,
+                        command_pending=self.current is not None, admission_quarantined=self.latched)
+        finally:
+            self.lock.release()
 
     def emergency_stop(self):
         with self.lock:

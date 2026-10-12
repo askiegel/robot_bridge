@@ -1214,6 +1214,9 @@ def status():
                 STREAM_DEFAULT_TIMEOUT_SECONDS
             ),
             "motion": stream_snapshot,
+            "guarded_controller": (publisher_node.champ_commands.recovery_status()
+                if publisher_node is not None and hasattr(publisher_node, 'champ_commands')
+                else {"available": False}),
             "motion_capabilities": {"linear_y": True, "max_linear_y": MAX_LINEAR_Y},
             "speech": speech_service.status(),
         }
