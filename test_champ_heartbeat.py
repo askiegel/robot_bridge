@@ -177,8 +177,18 @@ def rig(gate):
     node.emit();orig=adapter.snapshot
     def snapshot():node.emit();return orig()
     adapter.snapshot=snapshot
-    manager=HeartbeatCommands(adapter,'host-1',clock=gate.clock,sleep=gate.clock.sleep,epoch='bridge-1')
+    manager=HeartbeatCommands(adapter,'host-1',clock=gate.clock,sleep=gate.clock.sleep,epoch='bridge-1',
+        lidar_reader=lambda: clear_lidar(gate.clock))
     return gate,node,adapter,manager
+
+
+def clear_lidar(clock):
+    """Explicit simulated, advancing scan; never an implicit production bypass."""
+    return dict(available=True, age_seconds=.01, producer_session='lidar-1',
+        acquisition_sequence=clock(), source_stamp_ns=clock(),
+        received_monotonic_seconds=clock()/1e9-.01, currentness_fault=None,
+        scan=dict(frame_id='lidar_link', angle_min=-math.pi,
+            angle_increment=math.tau/80, range_min=.02, range_max=8., ranges=[2.]*80))
 
 @pytest.mark.parametrize('axes',[(.1,0,0),(-.1,0,0),(0,.08,0),(0,-.08,0),(0,0,.3),(0,0,-.3)])
 def test_real_adapter_and_controller_component_bounded_two_second_command(rig,axes):

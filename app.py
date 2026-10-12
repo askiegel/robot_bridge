@@ -410,7 +410,8 @@ class RobotBridgePublisher(Node):
         self.champ_transport = ChampTransport(
             self, lambda: self.publisher.publish(Twist()), on_status=self.record_controller_state)
         self.champ_commands = HeartbeatCommands(
-            self.champ_transport, Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+            self.champ_transport, Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+            lidar_reader=lidar_telemetry.snapshot)
         self.navigation_preflight_lock = threading.Lock()
         self.latest_scan_stamp = None
         self.latest_scan_frame = None

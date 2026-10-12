@@ -1,0 +1,827 @@
+{
+  "mission_id": "mission-53532164",
+  "source_record_sha256": "927149584b3fb8dff3ead4fc6e2129f804a9dd14b7cf3cce68612b2a90a27605",
+  "historical_terminal": "ARRIVED",
+  "historical_arrival": true,
+  "evidence_kind": "Retained action metadata and exact retained forward-JIT geometry checks; no active-time raw scan series or measured displacement",
+  "actions": [
+    {
+      "index": 1,
+      "state": "SEARCHING",
+      "source_stamp": 1791323180123392634,
+      "axes": [
+        0.0,
+        0.0,
+        0.25
+      ],
+      "duration": 1.0,
+      "tracker_quality": null,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 2,
+      "state": "ALIGNING",
+      "source_stamp": 1791323184130503632,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9755724668502808,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 3,
+      "state": "ALIGNING",
+      "source_stamp": 1791323184927914417,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9513708353042603,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 4,
+      "state": "ADVANCING",
+      "source_stamp": 1791323185802812045,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.829837441444397,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.511355594595503,
+        "nearest_x_m": 0.23385111771666153,
+        "nearest_y_m": 0.47716172377764615,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 5,
+      "state": "ADVANCING",
+      "source_stamp": 1791323186549404938,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9368811249732971,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4947478174547669,
+        "nearest_x_m": 0.2117054934975218,
+        "nearest_y_m": 0.46757538028533785,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 6,
+      "state": "ADVANCING",
+      "source_stamp": 1791323187375161371,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8855471014976501,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.49355290236464255,
+        "nearest_x_m": 0.19081351756381196,
+        "nearest_y_m": 0.47303913231768513,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 7,
+      "state": "ALIGNING",
+      "source_stamp": 1791323188106764431,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9306369423866272,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 8,
+      "state": "ADVANCING",
+      "source_stamp": 1791323188979026734,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8791068196296692,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.5095899944260069,
+        "nearest_x_m": 0.14964812631910251,
+        "nearest_y_m": 0.499752151911515,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 9,
+      "state": "ADVANCING",
+      "source_stamp": 1791323189718160063,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8945507407188416,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.48816332150601477,
+        "nearest_x_m": 0.15297028295304693,
+        "nearest_y_m": 0.47717978717916604,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 10,
+      "state": "ALIGNING",
+      "source_stamp": 1791323190486602512,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8875174522399902,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 11,
+      "state": "ALIGNING",
+      "source_stamp": 1791323191240050317,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8202131390571594,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 12,
+      "state": "ALIGNING",
+      "source_stamp": 1791323192107948541,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8080615997314453,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 13,
+      "state": "ADVANCING",
+      "source_stamp": 1791323192924076521,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8922032713890076,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.48505956587427446,
+        "nearest_x_m": 0.13201309924343146,
+        "nearest_y_m": 0.4780759709487883,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 14,
+      "state": "ADVANCING",
+      "source_stamp": 1791323193811519304,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8681513071060181,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.47073480720119343,
+        "nearest_x_m": 0.1251883152204072,
+        "nearest_y_m": 0.4646912695167206,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 15,
+      "state": "ALIGNING",
+      "source_stamp": 1791323194672187641,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8107971549034119,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 16,
+      "state": "ALIGNING",
+      "source_stamp": 1791323195429845339,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8781633377075195,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 17,
+      "state": "ADVANCING",
+      "source_stamp": 1791323196265811784,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9167560338973999,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.47349184392041527,
+        "nearest_x_m": 0.14683342073557695,
+        "nearest_y_m": 0.4634844278805941,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 18,
+      "state": "ADVANCING",
+      "source_stamp": 1791323197119461561,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9013357758522034,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4745111847563502,
+        "nearest_x_m": 0.12318932196534493,
+        "nearest_y_m": 0.4688327928047783,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 19,
+      "state": "ADVANCING",
+      "source_stamp": 1791323198015351705,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8592477440834045,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4739528177931603,
+        "nearest_x_m": 0.10161950698667704,
+        "nearest_y_m": 0.4711334205854314,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 20,
+      "state": "ADVANCING",
+      "source_stamp": 1791323198932852004,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8109669089317322,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.47123911957115816,
+        "nearest_x_m": 0.09986128597532293,
+        "nearest_y_m": 0.4685938112855177,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 21,
+      "state": "ALIGNING",
+      "source_stamp": 1791323204125221103,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9945389032363892,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 22,
+      "state": "ALIGNING",
+      "source_stamp": 1791323204992756932,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9130861163139343,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 23,
+      "state": "ADVANCING",
+      "source_stamp": 1791323205817849265,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8374028205871582,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4822226740749952,
+        "nearest_x_m": 0.05145885149884277,
+        "nearest_y_m": 0.4822204673635736,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 24,
+      "state": "ADVANCING",
+      "source_stamp": 1791323206461364291,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.912400484085083,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4672916522351104,
+        "nearest_x_m": 0.04140261787514635,
+        "nearest_y_m": 0.4672916522351104,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 25,
+      "state": "ADVANCING",
+      "source_stamp": 1791323207342506677,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8232791423797607,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.47153824261808786,
+        "nearest_x_m": 0.023486362958650794,
+        "nearest_y_m": 0.47153824261808786,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 26,
+      "state": "ADVANCING",
+      "source_stamp": 1791323208183117238,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8663811683654785,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.47172758276311727,
+        "nearest_x_m": 0.017739960725862675,
+        "nearest_y_m": 0.47172758276311727,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 27,
+      "state": "ALIGNING",
+      "source_stamp": 1791323220922161798,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9972113966941833,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 28,
+      "state": "ADVANCING",
+      "source_stamp": 1791323221713015604,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8887463808059692,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4672108702805425,
+        "nearest_x_m": -0.03767455365178323,
+        "nearest_y_m": 0.4656894086356708,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 29,
+      "state": "ADVANCING",
+      "source_stamp": 1791323222533107270,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.905330240726471,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.47309210723372197,
+        "nearest_x_m": -0.07279732223246563,
+        "nearest_y_m": 0.46745768985291714,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 30,
+      "state": "ALIGNING",
+      "source_stamp": 1791323223318496826,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8710538744926453,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 31,
+      "state": "ADVANCING",
+      "source_stamp": 1791323224199057171,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8556798696517944,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.6144867963503007,
+        "nearest_x_m": 0.657975411368963,
+        "nearest_y_m": 0.08921839529825754,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 32,
+      "state": "ALIGNING",
+      "source_stamp": 1791323224937385988,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8650755286216736,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 33,
+      "state": "ALIGNING",
+      "source_stamp": 1791323225767395125,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8695690035820007,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 34,
+      "state": "ADVANCING",
+      "source_stamp": 1791323233121755385,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9974172115325928,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4730960347817239,
+        "nearest_x_m": -0.07282092996588864,
+        "nearest_y_m": 0.4674579877219912,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 35,
+      "state": "ADVANCING",
+      "source_stamp": 1791323233984701777,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8889462947845459,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.47996855161589735,
+        "nearest_x_m": -0.09655817587872564,
+        "nearest_y_m": 0.4701556436024515,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 36,
+      "state": "ADVANCING",
+      "source_stamp": 1791323234739630951,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.395504119421779,
+      "tracker_quality": 0.8233057260513306,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4652005119959502,
+        "nearest_x_m": -0.07870099999999997,
+        "nearest_y_m": 0.45849500429153445,
+        "remaining_seconds": 0.395504119421779
+      }
+    },
+    {
+      "index": 37,
+      "state": "ALIGNING",
+      "source_stamp": 1791323241883230212,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.9451176524162292,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 38,
+      "state": "ALIGNING",
+      "source_stamp": 1791323242777557578,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8551874756813049,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 39,
+      "state": "ALIGNING",
+      "source_stamp": 1791323243583898289,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8970534205436707,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 40,
+      "state": "ALIGNING",
+      "source_stamp": 1791323244410915945,
+      "axes": [
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8849548697471619,
+      "source_stamp_consumed": null,
+      "historical_completed": true
+    },
+    {
+      "index": 41,
+      "state": "ADVANCING",
+      "source_stamp": 1791323245240118988,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.4230839315812662,
+      "tracker_quality": 0.859775185585022,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.47797808845397416,
+        "nearest_x_m": -0.09637533738435719,
+        "nearest_y_m": 0.4681611339978645,
+        "remaining_seconds": 0.4230839315812662
+      }
+    },
+    {
+      "index": 42,
+      "state": "ADVANCING",
+      "source_stamp": 1791323246021329248,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8533961772918701,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4720501786536985,
+        "nearest_x_m": -0.10195657490278326,
+        "nearest_y_m": 0.4609080472296853,
+        "remaining_seconds": 0.5
+      }
+    },
+    {
+      "index": 43,
+      "state": "ADVANCING",
+      "source_stamp": 1791323246599907014,
+      "axes": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "duration": 0.5,
+      "tracker_quality": 0.8504726886749268,
+      "source_stamp_consumed": true,
+      "historical_completed": true,
+      "retained_jit_full_capsule_check": {
+        "permitted": true,
+        "reason": "active_lidar_clear",
+        "protected_radius_m": 0.45,
+        "minimum_swept_clearance_m": 0.4699507195203787,
+        "nearest_x_m": -0.1301426866696322,
+        "nearest_y_m": 0.45157121241741216,
+        "remaining_seconds": 0.5
+      }
+    }
+  ]
+}
