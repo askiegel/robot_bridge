@@ -27,6 +27,7 @@ class HeartbeatCommands:
         self.generation = 0
         self.session = None
         self.latched = False
+        self.stop_request = None
         self.lidar_reader = lidar_reader
 
     def _lidar_decision(self, axes, remaining, previous=None):
@@ -131,11 +132,25 @@ class HeartbeatCommands:
                 and all(type(s.get(k)) in (int, float) and s[k] == 0
                         for k in ('linear_x', 'linear_y', 'angular_z')))
 
-    def _ack(self, p, *, zero=False):
+    def _ack(self, p, *, zero=False, stop_request=None):
         limit = self.clock() + TIMEOUT_NS
+        if stop_request is not None:
+            limit = min(limit, stop_request['expires_ns'])
         for _ in range(50):
             if self.clock() >= limit:
                 break
+            if stop_request is not None:
+                with self.lock:
+                    latest = self.stop_request
+                    superseded = latest is not stop_request
+                    if superseded and (latest['command'] is not stop_request['command']
+                                       or latest['result'] is not None):
+                        return False, 'stop_request_superseded'
+                if superseded:
+                    # Await only within this waiter's original bound. An old
+                    # packet's ACK cannot resolve a newer pending STOP.
+                    self.sleep(.005)
+                    continue
             s = self._status()
             if s and s['controller_session'] != p['controller_session']:
                 return False, 'controller_restarted'
@@ -163,7 +178,8 @@ class HeartbeatCommands:
                         and p['controller_session'] == self.session
                         and not self._check_safety(self.current)):
                     return False, self.current.get('safety_failure') or 'command_cancelled'
-            exact = (s and s.get('last_operation') == p['operation']
+            exact = (s and s.get('host_boot_id') == p['host_boot_id']
+                     and s.get('last_operation') == p['operation']
                      and s.get('last_request_generation') == p['generation']
                      and s.get('last_request_sequence') == p['sequence']
                      and s.get('last_request_issued_ns') == p['issued_ns'])
@@ -171,12 +187,29 @@ class HeartbeatCommands:
                 if exact:
                     if s.get('last_request_accepted') is not True:
                         return False, s.get('reason', 'controller_refused')
-                    if p['operation'] == STOP and (
-                            s.get('bridge_epoch') != p['bridge_epoch']
-                            or s.get('generation') != p['generation']
-                            or s.get('sequence') != p['sequence']):
+                    # Global emergency zero does not acquire a Bridge epoch.
+                    # Verify its captured controller owner stayed unchanged;
+                    # normal START still requires the existing SYNC protocol.
+                    owner = stop_request.get('controller_owner') if stop_request else None
+                    if owner and (type(owner['bridge_epoch']) is not str
+                                  or len(owner['bridge_epoch']) > 64
+                                  or any(type(owner[k]) is not int or owner[k] < 0
+                                         for k in ('generation', 'sequence', 'deadline_ns'))):
+                        return False, 'controller_command_owner_unavailable'
+                    expected_epoch = owner['bridge_epoch'] if owner else p['bridge_epoch']
+                    if (s.get('bridge_epoch') != expected_epoch
+                            or (owner and any(s.get(k) != owner[k] for k in
+                                             ('generation', 'sequence', 'deadline_ns')))
+                            or (p['generation'] and (
+                                s.get('generation') != p['generation']
+                                or s.get('sequence') != p['sequence']
+                                or s.get('deadline_ns') != p['deadline_ns']))):
                         return False, 'controller_command_owner_changed'
-                    if self._zero(s):
+                    if self._zero(s) and s['evaluated_ns'] >= p['issued_ns']:
+                        if stop_request is not None:
+                            with self.lock:
+                                if self.stop_request is stop_request and stop_request['result'] is None:
+                                    stop_request['evidence'] = dict(s)
                         if p['operation'] == STOP:
                             with self.lock:
                                 c = self.current
@@ -232,7 +265,8 @@ class HeartbeatCommands:
                 or sum(v != 0 for v in (x, y, yaw)) != 1):
             return self._result('refused', 'unsupported_bounded_command', False, False)
         with self.lock:
-            if self.current or self.latched:
+            if (self.current or self.latched or
+                    (self.stop_request is not None and self.stop_request['result'] is None)):
                 return self._result('refused', 'owner_busy_or_unresolved', False, False)
             gate = self._lidar_decision((x, y, yaw), duration)
             if gate['permitted'] is not True:
@@ -255,6 +289,7 @@ class HeartbeatCommands:
                 return self._result('refused', 'start_clock_not_after_zero', False, False)
             self.generation += 1
             c = dict(generation=self.generation, sequence=1, start=now,
+                     controller_session=self.session, bridge_epoch=self.epoch,
                      end=now+int(duration*1e9), axes=(x,y,yaw), retired=False, cancelled=False, last_send=now,
                      stop_packet=None, stop_result=None, lidar_safety=gate,
                      next_safety_check=0, safety_failure=None, last_verified_lidar=dict(gate),
@@ -330,6 +365,50 @@ class HeartbeatCommands:
                 return self._finish(c, 'interrupted', s.get('reason', 'completion_interrupted'), attempted)
         return self._finish(c, 'completed', 'bounded_deadline_completed', attempted)
 
+    def _begin_stop(self, p, c, controller_owner=None):
+        # Under the publication fence. The record binds the result to this exact
+        # packet, not merely its generation or a later zero-velocity snapshot.
+        request = dict(packet=p, command=c, result=None, evidence=None,
+                       expires_ns=self.clock() + TIMEOUT_NS, controller_owner=controller_owner)
+        if self.stop_request is not None and self.stop_request['packet'] == p:
+            request['result'] = (False, 'stop_packet_identity_reused')
+            self.latched = True
+        self.stop_request = request
+        if c is not None:
+            c['stop_packet'], c['stop_result'], c['stop_certificate'] = p, request['result'], None
+        return request
+
+    def _resolve_stop(self, request, result):
+        with self.lock:
+            latest = self.stop_request
+            c, p = request['command'], request['packet']
+            if self.current is not c:
+                return False, 'retired_command_owner'
+            if latest is not request:
+                # Only a newer independently verified STOP of this same retired
+                # command can replace the old waiter's outcome. No old callback
+                # writes the successor's result, certificate, or quarantine.
+                if (latest['command'] is c and latest['result'] is not None
+                        and latest['packet']['controller_session'] == self.session
+                        and latest['packet']['bridge_epoch'] == self.epoch):
+                    return latest['result']
+                self.latched = True
+                return False, 'superseding_stop_unresolved'
+            if request['result'] is not None:
+                return request['result']  # A second waiter cannot reverse it.
+            if (p['controller_session'] != self.session or p['bridge_epoch'] != self.epoch
+                    or (c is not None and (p['controller_session'] != c['controller_session']
+                                            or p['bridge_epoch'] != c['bridge_epoch']))):
+                result = (False, 'stop_owner_changed')
+            if result[0] and request['evidence'] is None:
+                result = (False, 'stop_evidence_missing')
+            request['result'] = result
+            if c is not None:
+                c['stop_result'] = result
+            if not result[0]:
+                self.latched = True
+            return result
+
     def _stop(self, c):
         with self.lock:
             if self.current is not c:
@@ -342,41 +421,45 @@ class HeartbeatCommands:
                 return c['stop_result']
             if c['stop_packet'] is None:
                 c['sequence'] += 1
-                c['stop_packet'] = self._packet(STOP, c)
+                request = self._begin_stop(self._packet(STOP, c), c)
                 try:
                     self._publish(c['stop_packet'])
                 except Exception:
-                    c['stop_result'] = (False, 'stop_publication_uncertain')
-                    self.latched = True
-                    return c['stop_result']
-            p = c['stop_packet']
-        result = self._ack(p, zero=True)
-        with self.lock:
-            c['stop_result'] = result
-            if not result[0]:
-                self.latched = True
-        return result
+                    return self._resolve_stop(request, (False, 'stop_publication_uncertain'))
+            else:
+                request = self.stop_request
+            p = request['packet']
+        result = self._ack(p, zero=True, stop_request=request)
+        return self._resolve_stop(request, result)
 
     def _finish(self, c, state, reason, attempted):
         # RLock callers are safe; current remains held through STOP resolution.
+        uncertain = state == 'uncertain'
         with self.lock:
             if self.current is not c:
                 return self._result('refused', 'retired_command_owner', False, False)
             if c['cancelled']:
                 state, reason = 'interrupted', 'command_cancelled'
-        ok, stop_reason = self._stop(c)
+        self._stop(c)
         with self.lock:
+            if self.current is not c:
+                return self._result('refused', 'retired_command_owner', False, False)
+            # A new STOP can begin between _stop's return and this lock. Its
+            # unresolved result must not inherit the preceding zero proof.
+            ok, stop_reason = c['stop_result'] or (False, 'superseding_stop_unresolved')
+            if (c['controller_session'] != self.session or c['bridge_epoch'] != self.epoch):
+                ok, stop_reason = False, 'stop_owner_changed'
             # Cancellation may arrive during the STOP acknowledgment wait.
             if c['cancelled']:
                 state, reason = 'interrupted', 'command_cancelled'
-            if state == 'uncertain' or not ok:
+            if uncertain or state == 'uncertain' or not ok:
                 self.latched = True
                 state = 'uncertain'
             if self.current is c:
                 self.current = None
         r = self._result(state, reason, attempted, ok)
         r.update(generation=c['generation'], start_ns=c['start'], deadline_ns=c['end'],
-                 controller_session=self.session, bridge_epoch=self.epoch,
+                 controller_session=c['controller_session'], bridge_epoch=c['bridge_epoch'],
                  stop_reason=stop_reason,
                  controller_acceptance=c.get('acceptance'), lidar_safety=c['lidar_safety'],
                  stop_certificate=c.get('stop_certificate') if ok else None,
@@ -410,7 +493,8 @@ class HeartbeatCommands:
                 c['retired'] = c['cancelled'] = True
             s = self._status()
             if not s:
-                self.latched = True
+                request = self._begin_stop(self._packet(EMERGENCY, c), c)
+                self._resolve_stop(request, (False, 'unverified_emergency_zero'))
                 try:
                     self.transport.emergency_zero()  # Legacy zero is stop-only.
                 except Exception:
@@ -418,23 +502,20 @@ class HeartbeatCommands:
                 return dict(ok=False, reason='unverified_emergency_zero')
             self.session = s['controller_session']
             p = self._packet(EMERGENCY, c)
+            owner = ({k: s.get(k) for k in ('bridge_epoch', 'generation', 'sequence', 'deadline_ns')}
+                     if c is None else None)
+            request = self._begin_stop(p, c, controller_owner=owner)
             try:
                 self._publish(p)
             except Exception:
-                self.latched = True
+                ok, why = self._resolve_stop(request, (False, 'emergency_publication_uncertain'))
                 try:
                     self.transport.emergency_zero()
                 except Exception:
                     pass
-                return dict(ok=False, reason='emergency_publication_uncertain')
-            if c:
-                c['stop_packet'] = p
-        ok, why = self._ack(p, zero=True)
-        with self.lock:
-            if c:
-                c['stop_result'] = (ok, why)
-            if not ok:
-                self.latched = True
+                return dict(ok=ok, reason=why, controller_gait_zero=ok)
+        result = self._ack(p, zero=True, stop_request=request)
+        ok, why = self._resolve_stop(request, result)
         return dict(ok=ok, reason=why, controller_gait_zero=ok)
 
     @staticmethod

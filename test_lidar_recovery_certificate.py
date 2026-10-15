@@ -134,6 +134,9 @@ def test_flask_client_behavior_mission_watchdog_stop_wait_reacquire_and_arrive(r
     monkeypatch.setattr(bridge, 'publisher_node', SimpleNamespace(champ_commands=m))
     local = bridge.app.test_client()
     def urlopen(req, **kw):
+        # Distinct HTTP acquisitions have advancing host time, including STOPs
+        # issued back-to-back while stationary. No command bound is extended.
+        g.clock.sleep(.000000001)
         path = req.full_url.removeprefix('http://offline.invalid')
         assert path in ('/motion','/stop','/status')
         reply = local.post(path,json=json.loads(req.data) if req.data else {}) if req.method=='POST' else local.get(path)
