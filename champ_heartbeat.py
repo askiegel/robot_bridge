@@ -383,6 +383,17 @@ class HeartbeatCommands:
             latest = self.stop_request
             c, p = request['command'], request['packet']
             if self.current is not c:
+                # Another waiter may have committed this exact STOP and then
+                # finished/detached its command. Return that immutable outcome
+                # only while no successor or newer STOP owns the fence. This
+                # is reply accounting, never publication or renewed authority.
+                if (self.current is None and c is not None and c['retired']
+                        and latest is request and request['result'] is not None
+                        and c['stop_packet'] == p and c['stop_result'] == request['result']
+                        and p['controller_session'] == c['controller_session'] == self.session
+                        and p['bridge_epoch'] == c['bridge_epoch'] == self.epoch
+                        and (not request['result'][0] or request['evidence'] is not None)):
+                    return request['result']
                 return False, 'retired_command_owner'
             if latest is not request:
                 # Only a newer independently verified STOP of this same retired
