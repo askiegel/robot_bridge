@@ -98,7 +98,7 @@ def test_stop_before_acknowledgement_cannot_resume_or_receive_credit(rig):
     assert not g.tick()['active']
 
 
-def test_expiry_during_ack_is_accepted_but_interrupted_not_completed(rig):
+def test_short_command_expiry_during_start_ack_completes_with_exact_zero(rig):
     g,n,a,m=rig
     orig=m._ack
     def slow_ack(p,**kw):
@@ -107,10 +107,12 @@ def test_expiry_during_ack_is_accepted_but_interrupted_not_completed(rig):
         return orig(p,**kw)
     m._ack=slow_ack
     r=m.execute(.1,0,0,.1)
-    assert r['state']=='interrupted' and r['reason']=='command_deadline_expired'
+    assert r['state']=='completed' and r['reason']=='bounded_deadline_completed'
     assert r['controller_acceptance']['last_request_accepted']
     assert r['transport_attempted'] and r['controller_gait_zero']
-    assert not r['completed_progress_credit']
+    assert r['completed_progress_credit']
+    assert r['stop_certificate']['last_request_issued_ns'] >= r['deadline_ns']
+    assert r['stop_certificate']['last_request_accepted'] and r['stop_certificate']['gait_zero']
     assert len([p for p in n.messages if p['operation']==START])==1
     assert not any(p['operation']==HEARTBEAT for p in n.messages)
 

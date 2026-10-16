@@ -178,6 +178,8 @@ class HeartbeatCommands:
                         and p['controller_session'] == self.session
                         and not self._check_safety(self.current)):
                     return False, self.current.get('safety_failure') or 'command_cancelled'
+            if self.clock() >= limit:
+                break  # Status/acceptance work cannot extend this ACK window.
             exact = (s and s.get('host_boot_id') == p['host_boot_id']
                      and s.get('last_operation') == p['operation']
                      and s.get('last_request_generation') == p['generation']
@@ -355,15 +357,41 @@ class HeartbeatCommands:
             if p and why != 'controller_accepted':
                 return self._finish(c, 'interrupted', why, attempted)
             self.sleep(min(.005, max(0, (c['end']-self.clock())/1e9)))
-        with self.lock:
-            s = self._status()
-            if not s or s['controller_session'] != self.session:
-                return self._finish(c, 'uncertain', 'completion_status_unverified', attempted)
-            if (c['end']-c['last_send'] >= TIMEOUT_NS or s.get('generation') != c['generation']
-                    or s.get('bridge_epoch') != self.epoch
-                    or (s.get('active') is not True and s.get('reason') != 'command_deadline_expired')):
-                return self._finish(c, 'interrupted', s.get('reason', 'completion_interrupted'), attempted)
         return self._finish(c, 'completed', 'bounded_deadline_completed', attempted)
+
+    def _completion_outcome(self, c):
+        # Called under the current-command fence. A deadline observed in the
+        # loop, ACK wait or final check has one rule; scoped STOP is still due.
+        if c['retired'] or c['cancelled']:
+            return 'interrupted', 'command_cancelled'
+        if c['safety_failure']:
+            return 'interrupted', c['safety_failure']
+        s = self._status()
+        if not s or s['controller_session'] != self.session:
+            return 'uncertain', 'completion_status_unverified'
+        a = c.get('acceptance') or {}
+        issued = a.get('last_request_issued_ns')
+        evaluated = a.get('evaluated_ns')
+        if (self.clock() < c['end'] or c['controller_session'] != self.session
+                or c['bridge_epoch'] != self.epoch
+                or any(s.get(k) != v for k, v in (
+                    ('bridge_epoch', c['bridge_epoch']), ('generation', c['generation']),
+                    ('sequence', c['sequence']), ('deadline_ns', c['end'])))
+                or a.get('controller_session') != c['controller_session']
+                or a.get('bridge_epoch') != c['bridge_epoch']
+                or a.get('last_request_accepted') is not True
+                or a.get('last_request_generation') != c['generation']
+                or a.get('last_request_sequence') != c['sequence']
+                or a.get('last_operation') != (START if c['sequence'] == 1 else HEARTBEAT)
+                or type(issued) is not int or not c['start'] <= issued < c['end']
+                or type(evaluated) is not int or not issued <= evaluated <= s['evaluated_ns']
+                or c['end'] - issued >= TIMEOUT_NS
+                or (c['sequence'] > 1 and issued != c['last_send'])
+                or c['lidar_safety'].get('permitted') is not True):
+            return 'interrupted', 'completion_evidence_unverified'
+        if s.get('active') is not True and s.get('reason') != 'command_deadline_expired':
+            return 'interrupted', s.get('reason', 'completion_interrupted')
+        return 'completed', 'bounded_deadline_completed'
 
     def _begin_stop(self, p, c, controller_owner=None):
         # Under the publication fence. The record binds the result to this exact
@@ -451,6 +479,8 @@ class HeartbeatCommands:
                 return self._result('refused', 'retired_command_owner', False, False)
             if c['cancelled']:
                 state, reason = 'interrupted', 'command_cancelled'
+            elif state == 'completed' or (state == 'interrupted' and reason == 'command_deadline_expired'):
+                state, reason = self._completion_outcome(c)
         self._stop(c)
         with self.lock:
             if self.current is not c:
